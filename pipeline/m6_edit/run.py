@@ -75,7 +75,10 @@ def interpret_plan(request: str) -> EditPlan:
         "- keywords: 그 블록이 원하는 *장면/장소/상황* 키워드 배열. 예: 애견카페→[\"카페\"], "
         "산책→[\"산책\"], 비오는 날→[\"비\"], 밤→[\"밤\"], 하이파이브→[\"하이파이브\"]. "
         "장면 언급 없으면 빈 배열. (이걸로 어느 영상을 쓸지 거른다.)\n"
-        "전역 title: 영상 전체 공통 자막(보통 비움).\n"
+        "전역 title: 고객이 제목/전체 자막을 *명시적으로* 요청할 때만 그 문구를 넣어라. "
+        "'~영상 만들자/만들어줘' 는 목적 문장이지 제목 요청이 아니다 — 그 경우 반드시 "
+        "빈 문자열. (예: '우리 토리 소개 영상 만들자'→title=\"\", "
+        "'제목으로 우리 토리 넣어줘'→title=\"우리 토리\")\n"
         "예) '얼굴 5초 클로즈업하며 \"안녕\" 자막, 그 다음 노는 거 10초 \"신나요\" 자막' →\n"
         "  blocks=[{select:static,zoom:gradual,target_dur:5,caption:\"안녕\"},"
         "{select:dynamic,pace:fast,target_dur:10,caption:\"신나요\"}]\n요청: " + request
@@ -180,6 +183,12 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
     # 비줌: 소스마다 한 컷(연속). 길이 = target_dur / 소스수 (없으면 pace 기본).
     per = ((intent.target_dur / len(cand)) if intent.target_dur
            else (2.0 if intent.pace == "fast" else 4.0))
+    # 짧은 블록 + 매칭 소스 과다 → 컷당 길이가 min_clip 미달로 전부 탈락하는 엣지
+    # (모드 A 구절 길이 블록에서 실측). 소스 수를 줄여 한 컷을 길게 유지한다.
+    if intent.target_dur and per < min_clip:
+        k = max(1, int(intent.target_dur / min_clip))
+        cand = sorted(cand, key=lambda c: c[2] - c[1], reverse=True)[:k]
+        per = intent.target_dur / len(cand)
     clips: list[tuple[str, float, float]] = []
     for mp4, s0, s1 in cand:
         length = min(per, s1 - s0)

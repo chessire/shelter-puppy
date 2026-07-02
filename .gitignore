@@ -209,3 +209,6 @@ Thumbs.db
 
 # --- Claude Code 개인 권한 설정 (공유 불필요) ---
 .claude/settings.local.json
+
+# --- M5 TTS 전용 venv (프로젝트 venv 오염 방지, 서브프로세스 워커용) ---
+venv-tts/

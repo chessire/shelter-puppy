@@ -26,6 +26,9 @@ _BLOCK_PROPS = {
     "speed": {"type": "number"},
     "caption": {"type": "string"},      # 이 블록 동안 아래에 띄울 한글 자막. 없으면 빈 문자열.
     "keywords": {"type": "array", "items": {"type": "string"}},  # 장면/상황 키워드(소스 필터용)
+    # 모드 A: 이 블록 동안 읽을 내레이션 구절(없으면 빈 문자열 = 무음 블록).
+    # 내레이션이 타임라인 주인 — 있으면 블록 길이는 구절 길이가 정한다(m5_tts.render).
+    "narration": {"type": "string"},
 }
 
 PLAN_SCHEMA = {
@@ -53,6 +56,7 @@ class EditBlock:
     speed: float = 1.0           # 재생속도 배율
     caption: str = ""            # 이 블록 동안 띄울 자막(빈값=없음)
     keywords: list = None        # 장면/상황 키워드(소스 태그 필터). 비면 전체 소스.
+    narration: str = ""          # 모드 A: 이 블록 동안 읽을 내레이션 구절(빈값=무음 블록)
 
     @classmethod
     def from_dict(cls, d: dict) -> "EditBlock":
@@ -67,6 +71,7 @@ class EditBlock:
             speed=(float(sp) if sp else 1.0),
             caption=str(d.get("caption", "") or ""),
             keywords=[str(k) for k in (d.get("keywords") or [])],
+            narration=str(d.get("narration", "") or ""),
         )
 
 

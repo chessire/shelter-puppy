@@ -28,6 +28,10 @@ from pathlib import Path
 from .harness import io
 from .m1_track.run import run as m1_run
 from .m4_action.run import run as m4_run
+from .m5_tts import DEFAULT_VOICE
+from .m5_tts.interpret import decide_mode, interpret_narration
+from .m5_tts.render import render_narrated
+from .m6_edit.badge import apply_badge
 from .m6_edit.run import _probe_dur, interpret_plan, render_plan
 from .preprocess.normalize import normalize
 from .workspace import Workspace
@@ -122,8 +126,16 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
 # --------------------------------------------------------------------------- #
 def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
            fps: float = 30.0, thr: float = 8.0, conf_thr: float = 0.6,
-           max_crops: int = 10, out_name: str = "final.mp4") -> Path:
-    """M4 동작판정(소스별) + M6 편집 → out/. meta 의 sources·foster_track 사용."""
+           max_crops: int = 10, out_name: str = "final.mp4",
+           voice: str | None = None) -> Path:
+    """M4 동작판정(소스별) + 모드 라우팅(A=내레이션/B=편집만) → out/.
+
+    모드는 meta.mode(카드/수동 확정) 우선, 없으면 decide_mode 3단(핀→logprob→uncertain).
+    uncertain 은 needs_mode_pick 상태로 멈춤 — "자막인지 음성인지" 고객 카드 1탭 대상.
+    보이스는 voice 인자 > meta.voice(고객 선택) > 기본 eric — 잡 단위 통일 정책.
+    M4 태그는 요청과 무관한 영상 분석이라 재렌더 시 재사용(설계서: '한 번 분석해두면
+    내레이션 여러 버전에 재사용').
+    """
     meta = ws.read_meta()
     names = meta.get("sources")
     if not names:
@@ -131,17 +143,43 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
     if meta.get("state") == "needs_foster_pick":
         raise SystemExit(f"{ws.root}: 임보견 선택 대기 중. meta.foster_track 설정 후 재시도.")
 
-    ws.update_meta(state="rendering", request=request)
+    mode = meta.get("mode")
+    if mode in ("narration", "edit"):
+        print(f"[모드] {mode} (meta 지정)")
+    else:
+        mode, conf = decide_mode(request)
+        if mode == "uncertain":
+            ws.update_meta(state="needs_mode_pick", request=request)
+            raise SystemExit(
+                f"{ws.root}: 자막/음성 모호(확신 {conf:.2f}) — 고객 카드 대상. "
+                "meta.mode 를 'narration' 또는 'edit' 로 설정 후 재시도.")
+        print(f"[모드] {mode} (확신 {conf:.2f})")
+
+    voice = voice or meta.get("voice") or DEFAULT_VOICE
+    ws.update_meta(state="rendering", request=request, mode=mode, voice=voice)
     for name in names:
+        if ws.preds_m4(name).exists():
+            print(f"[M4] {name} 태그 재사용")
+            continue
         print(f"[M4] {name} 동작판정…")
         m4_run(name, thr, fps, conf_thr, max_crops, ws=ws)
 
-    print(f"[M6] 편집 인텐트 해석…")
-    plan = interpret_plan(request)
-    print(f"     title={plan.title!r}  블록 {len(plan.blocks)}개")
     sources = [(str(ws.analysis(n)), str(ws.preds_m4(n))) for n in names]
     out_path = ws.out(out_name)
-    render_plan(plan, sources, str(out_path), size, fps, ws=ws)
+    if mode == "narration":
+        print("[M5+M6] 대본 분해·합성·렌더…")
+        plan = interpret_narration(request)
+        n_narr = sum(1 for b in plan.blocks if b.narration)
+        print(f"     블록 {len(plan.blocks)}개 (내레이션 {n_narr}구절, 보이스 {voice})")
+        render_narrated(plan, sources, str(out_path), size, fps, ws=ws, voice=voice)
+    else:
+        print("[M6] 편집 인텐트 해석…")
+        plan = interpret_plan(request)
+        print(f"     title={plan.title!r}  블록 {len(plan.blocks)}개")
+        raw = out_path.with_name("_raw_" + out_name)
+        render_plan(plan, sources, str(raw), size, fps, ws=ws)
+        apply_badge(raw, out_path, tts=False, size=size)   # 모드 B 도 "AI 편집" 배지
+        raw.unlink(missing_ok=True)
     ws.update_meta(state="done", out=str(out_path))
     print(f"[done] → {out_path}  (실측 {_probe_dur(str(out_path)):.1f}s)")
     return out_path
@@ -160,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", default="1080x1920")
     p.add_argument("--weights", default="yolo11m.pt")
     p.add_argument("--conf", type=float, default=0.25)
+    p.add_argument("--voice", default=None,
+                   help="TTS 보이스(모드 A, 잡 단위 통일). 기본 meta.voice 또는 eric")
     args = p.parse_args(argv)
 
     if args.inputs:
@@ -181,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     w, h = (int(x) for x in args.size.split("x"))
-    render(ws, args.request, (w, h))
+    render(ws, args.request, (w, h), voice=args.voice)
     return 0
 
 
