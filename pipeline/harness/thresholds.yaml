@@ -1,0 +1,53 @@
+# 블록별 pass 임계값 레지스트리.
+#
+# 설계서: "쪼갠 직후 첫 할 일은 블록별 통과 임계값 확정." 지금은 전부 null(미정,
+# [미검증]). 실제 영상 3개로 첫 실측을 돌린 뒤, 그 분포를 보고 숫자를 채운다.
+#
+# 표기:
+#   {min: x} → 값이 x 이상이어야 통과 (높을수록 좋음)
+#   {max: x} → 값이 x 이하여야 통과 (낮을수록 좋음)
+#   null     → 미설정. CLI 는 숫자만 출력하고 PASS/FAIL 판정 보류.
+
+m1:                          # 검출·추적  (모델: yolo11m@768, M0 측정으로 확정)
+  # [v2, 2026-06-30] 역할분리: M1 하드바 = '검출'(miss_rate). 정체성(idsw/idf1)은
+  # M2 re-ID 가 메우므로 M1 에선 '측정만'.
+  # 임계 0.30 근거: 정상 footage 검출률 73~100%(miss 0.00~0.27)는 트랙 유지·클립
+  # 선별에 충분. 매 프레임 검출이 목표가 아님. 0.30 으로 정상 5영상 중 4개 PASS.
+  # 예외: IMG_0008(벽/책상/의자 가림 + 원거리, miss 0.74)은 *footage 자체가 비사용*
+  #       이라 의식적 예외 처리. 한 병적 영상이 기준을 끌어내리지 않게 함.
+  miss_rate:   {max: 0.30}   # ★ 검출 하한 (제품: 쓸 만한 클립 확보 가능 수준)
+  idf1:        {min: null}   # 측정만 (M2 게이트에서 판정)
+  mota:        {min: null}   # 측정만 (idsw 포함이라 M1 단독 판정엔 부적합)
+  idsw:        {max: null}   # 측정만 (M2 가 줄일 대상)
+
+m2:                          # re-ID ★게이트  (제품모델: 단독 임보견 1마리 추적)
+  # [v1, 2026-06-30] 측정: 임보견 1탭 지정 후 그 개 조각 자동 추적. DINOv2-small
+  # 평균 임베딩 + 시간상호배제, τ=0.75 운영점.
+  # 결과(다견 worst case 5영상 12 시나리오): 평균 1.75탭/영상(목표 <2 충족),
+  #   falseAttach 1/12(~8%, 유사견종 한계 — 설계서 "완벽 자동 불가" 그대로).
+  # 멀티레퍼런스(max/top2)는 데이터가 기각(평균이 더 나음).
+  # 잔여 falseAttach 완화책: ① auto도 확인카드 노출(사람이 흘긋) ② 설계서의
+  #   LLM 타이브레이커 레이어(경계는 Gemma 비교) — 미구현, Gemma 준비 시.
+  interventions:    {max: 2}      # ★ 탭/영상 (단독 임보견). 단독환경 ≈1, 다견 worst≈1.75
+  pair_precision:   {min: null}   # falseAttach=0 목표지만 유사견종 한계로 보류
+  pair_recall:      {min: null}   # 측정만(안 묶인 건 사람 카드 = 설계대로)
+  auto_relink_rate: {min: null}
+
+m3:                          # 모션 곡선
+  accuracy:           {min: null}
+  false_motion_rate:  {max: null} # 손떨림 오검출율
+
+m4:                          # 동작 판별 ★게이트(합침 C) — 2026-06-30 PASS
+  # [v2, 2026-06-30] 첫 실측(5영상 78s): group_accuracy 1.00(committed),
+  #   uncertain_rate 0.15(전체)/0.07(나쁜 footage IMG_0008 제외). → 게이트 통과.
+  # 임계는 느슨·방어가능하게: M4 는 독립 오라클이 아니라 3레이어 시스템의 부품.
+  #   애매한 구간은 레이어2 내레이션(유저 프롬프트)이 top-down 으로 흡수하고,
+  #   M4 의 group 신호는 "명백한 시각 모순" 가드로만 작동하면 충분.
+  # low_motion_recall: 참고용(표본 0.4s 뿐) — 게이트 아님. 저모션 footage 보강 시 승격.
+  group_accuracy:    {min: 0.90}   # ★ 게이트 (실측 1.00). 틀린 강조 방지가 핵심
+  uncertain_rate:    {max: 0.25}   # ★ 게이트 (실측 0.15). 영상당 ≈1탭 = 우아 범위
+  low_motion_recall: {min: null}   # 참고용(표본 0.4s) — 게이트 아님
+
+m5:                          # TTS 연결
+  match_accuracy:  {min: null}
+  uncertain_rate:  {max: null}

@@ -1,0 +1,9 @@
+# M0 측정 하네스 의존성 (기존 venv 에 이미 설치됨)
+numpy>=2.0
+scipy>=1.13
+PyYAML>=6.0
+pytest>=8.0
+# Phase 2+ (M1 모듈 구현 시 추가 예정):
+#   ultralytics  # YOLO 검출
+#   lap          # ByteTrack association
+#   pandas pyarrow  # parquet 리포트(선택)
