@@ -73,6 +73,28 @@ def script_invented(plan: EditPlan, request: str) -> bool:
     return bool(sents) and all(request.find(s) < 0 for s in sents)
 
 
+# 부정 핀 — 자막 거부 명시(결정론, m5_tts._EDIT_PINS 와 같은 결: 부정을 먼저 본다).
+# 빈 caption 이 "생각 안 함"(→채움)인지 "원치 않음"(→금지)인지는 요청만이 안다.
+_NO_TEXT_PINS = ("자막 없이", "자막없이", "텍스트 없이", "텍스트없이",
+                 "글자 없이", "글자없이", "자막은 빼", "자막 빼")
+
+
+def caption_forbidden(request: str) -> bool:
+    low = request.lower()
+    return any(p in low for p in _NO_TEXT_PINS)
+
+
+def _records(ws: Workspace, avail: list[str], profiles: dict) -> str:
+    """소재 관찰 기록(작가 입력). 길이는 실측 관찰 — 없으면 작가가 2초짜리 영상을
+    두 블록에 배치하는 실수를 한다(실측: 인트로·엔딩에 같은 2.3초 소재)."""
+    from ..m4_action.observe import motion_summary, profile_text
+    from .run import _probe_dur
+    return "\n".join(
+        f"[{n}] 길이 {max(_probe_dur(str(ws.analysis(n))), 0):.0f}초 | "
+        f"{profile_text(profiles[n], motion_summary(ws, n))}"
+        for n in avail)
+
+
 def _schema(names: list[str]) -> dict:
     block = {"type": "object", "properties": {
         "sources": {"type": "array", "items": {"enum": names}},
@@ -93,18 +115,13 @@ def author_plan(request: str, ws: Workspace, names: list[str],
                 narration: bool) -> EditPlan | None:
     """요청 + 관찰 프로필 → 저작 EditPlan. 실패(빈 블록 등)면 None(호출부 폴백)."""
     import ollama
-    from ..m4_action.observe import ensure_profiles, motion_summary, profile_text
-    from .run import _probe_dur
+    from ..m4_action.observe import ensure_profiles
     profiles = ensure_profiles(ws, names)
     if not profiles:
         return None
     avail = [n for n in names if n in profiles]
-    # 소재 길이는 실측 관찰 — 없으면 작가가 2초짜리 영상을 두 블록에 배치하는
-    # 실수를 한다(실측: 인트로·엔딩에 같은 2.3초 소재).
-    records = "\n".join(
-        f"[{n}] 길이 {max(_probe_dur(str(ws.analysis(n))), 0):.0f}초 | "
-        f"{profile_text(profiles[n], motion_summary(ws, n))}"
-        for n in avail)
+    records = _records(ws, avail, profiles)
+    allow_caption = not caption_forbidden(request)
     prompt = (
         # ⚠️ 프레이밍 상수 금지(2026-07-03 사용자): '임시보호/입양/홍보' 같은 목적을
         # 프롬프트가 주입하면 요청에 없는 문구("Adopt Me!"·"[임시보호]")가 제목·자막에
@@ -138,14 +155,14 @@ def author_plan(request: str, ws: Workspace, names: list[str],
             raw = json.loads(r.message.content)
         except json.JSONDecodeError:
             continue
-        plan = _to_plan(raw, request, avail, narration)
+        plan = _to_plan(raw, request, avail, narration, allow_caption)
         if plan is not None:
             return plan
     return None
 
 
-def _to_plan(raw: dict, request: str, avail: list[str],
-             narration: bool) -> EditPlan | None:
+def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
+             allow_caption: bool = True) -> EditPlan | None:
     """저작 응답 → 소독된 EditPlan. 구조 무효면 None(호출부가 재추첨)."""
     blocks = []
     for d in (raw.get("blocks") or [])[:MAX_BLOCKS]:
@@ -155,7 +172,8 @@ def _to_plan(raw: dict, request: str, avail: list[str],
             "select": d.get("select", "all"),
             "target_dur": (min(max(dur, DUR_MIN), DUR_MAX) if dur > 0 else None),
             "zoom": d.get("zoom", "none"),
-            "caption": _clean_text(d.get("caption", ""), request),
+            "caption": (_clean_text(d.get("caption", ""), request)
+                        if allow_caption else ""),
             "narration": (_clean_text(d.get("narration", ""), request)
                           if narration else ""),
             "sources": srcs,
@@ -167,6 +185,129 @@ def _to_plan(raw: dict, request: str, avail: list[str],
             b.subject = "foster"
         blocks.append(b)
     blocks = [b for b in blocks if b.sources or b.select != "all" or b.caption or b.narration]
-    if not blocks or not any(b.caption or b.narration for b in blocks):
+    if not blocks:
+        return None
+    # 텍스트 전무 = 결함(재추첨) — 단 고객이 자막을 거부했으면 무자막이 곧 의도.
+    if allow_caption and not any(b.caption or b.narration for b in blocks):
         return None
     return EditPlan(blocks=blocks, title=_clean_text(str(raw.get("title") or ""), request))
+
+
+# --------------------------------------------------------------------------- #
+# 부분 저작 — 유저 뼈대의 빈 필드만 채움 (그라디언트 요청, 2026-07-03 설계)
+# --------------------------------------------------------------------------- #
+# "구조 소유권은 이진, 빈칸 채움이 그라디언트": 요청 디테일은 천차만별이지만
+# (한 줄 목적 ~ 풀 스펙), 번역 뼈대의 *빈 필드 수*가 곧 그 그라디언트다. 병합은
+# 결정론 — 저작 출력에서 유저 명시 필드를 아예 읽지 않으므로 구조적으로 불변
+# (대본 삼킴·요청 복창 사고 계보의 재발 통로 차단).
+# 모드 A 는 sources 만 채운다 — 내레이션이 타임라인 주인이라 dur 을 채우면 무음이
+# 늘어지고(렌더가 max(dur, 구절길이)), 자막은 wants_caption 관례가 담당.
+
+def field_gaps(plan: EditPlan, narration: bool, allow_caption: bool = True) -> list[str]:
+    """블록별 빈 필드 스캔(결정론). 반환 = 갭 요약 리스트(로그용), 비면 갭 없음."""
+    gaps = []
+    for i, b in enumerate(plan.blocks):
+        need = []
+        if not (b.keywords or b.sources):
+            need.append("sources")
+        if not narration:
+            if allow_caption and not b.caption:
+                need.append("caption")
+            if not b.target_dur:
+                need.append("dur")
+        if need:
+            gaps.append(f"블록{i}:{'+'.join(need)}")
+    return gaps
+
+
+def fill_plan(request: str, ws: Workspace, names: list[str],
+              plan: EditPlan, narration: bool) -> EditPlan:
+    """유저가 정한 구성(뼈대)은 그대로, 빈 필드만 저작으로 채운다.
+
+    갭이 없으면 LLM 0호출로 plan 그대로(풀 스펙 요청 = 저작 기여 0으로 수렴).
+    채움 실패(JSON 2회)도 plan 그대로 — 기본값 렌더가 폴백(안전한 저하).
+    """
+    allow_caption = not caption_forbidden(request)
+    gaps = field_gaps(plan, narration, allow_caption)
+    if not gaps:
+        return plan
+    import ollama
+    from ..m4_action.observe import ensure_profiles
+    profiles = ensure_profiles(ws, names)
+    avail = [n for n in names if n in profiles]
+    if not avail:
+        return plan
+    print(f"[저작] 부분 채움 — 빈 필드 {gaps}")
+
+    skel = []
+    for i, b in enumerate(plan.blocks):
+        parts = [f"select={b.select}",
+                 f"장면 키워드={', '.join(b.keywords) if b.keywords else '(없음→sources 채울 것)'}",
+                 (f"자막={b.caption!r}" if b.caption
+                  else ("자막=(채울 것)" if allow_caption and not narration else "자막=(없음)")),
+                 (f"길이={b.target_dur:.0f}초" if b.target_dur
+                  else ("길이=(채울 것)" if not narration else "길이=(내레이션이 정함)"))]
+        if b.narration:
+            parts.append(f"내레이션={b.narration!r}")
+        skel.append(f"블록{i}: " + " · ".join(parts))
+
+    # required 로 전 키 강제 — 안 그러면 Gemma 가 dur 을 건너뛴다(전체 저작에서
+    # 12.2s, 부분 저작에서 13.5s 실측 재발). 갭 아닌 필드 출력은 병합이 무시한다.
+    fill_block = {"type": "object", "properties": {
+        "sources": {"type": "array", "items": {"enum": avail}},
+        "dur": {"type": "number"},
+        "caption": {"type": "string"}, "narration": {"type": "string"}},
+        "required": ["sources", "dur", "caption"]}
+    schema = {"type": "object",
+              "properties": {"blocks": {"type": "array", "items": fill_block}},
+              "required": ["blocks"]}
+    prompt = (
+        "너는 강아지 영상의 구성 작가다. 고객이 이미 영상 구성을 정했고, 일부 "
+        "항목만 비어 있다.\n"
+        f"고객 요청: {request}\n\n확정된 구성(순서·내용을 바꿀 수 없다):\n"
+        + "\n".join(skel) +
+        "\n\n소재(영상별 관찰 기록 — 기계 측정이라 오류 가능):\n"
+        + _records(ws, avail, profiles) +
+        "\n\n'(채울 것)' 표시된 빈 항목만 채워라. 블록 순서 그대로 blocks 배열로 "
+        "출력하고, 이미 값이 있는 항목의 출력은 무시된다.\n"
+        "- caption: 화면 하단 자막 한 문장 — 고객 요청의 말투·호칭·이름 그대로\n"
+        "- dur: 그 블록 길이(초, 3~10)\n"
+        "- sources: 키워드 없는 블록만 — 그 장면에 어울리는 소재 이름 1~3개"
+        "(관찰 기록을 근거로)")
+    for _ in range(2):
+        r = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}],
+                        options={"temperature": AUTHOR_TEMP, "num_predict": 1024,
+                                 "repeat_penalty": 1.3},
+                        format=schema, think=False)
+        try:
+            raw = json.loads(r.message.content)
+        except json.JSONDecodeError:
+            continue
+        _merge_fill(plan, raw, request, avail, narration, allow_caption)
+        return plan
+    return plan
+
+
+def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
+                narration: bool, allow_caption: bool) -> None:
+    """결정론 병합 — *빈 슬롯에만* 기입. 유저 명시 필드는 저작 출력에서 읽지 않는다."""
+    for i, (b, d) in enumerate(zip(plan.blocks, raw.get("blocks") or [])):
+        filled = []
+        if not (b.keywords or b.sources):
+            srcs = [s for s in dict.fromkeys(d.get("sources") or []) if s in avail]
+            if srcs:
+                b.sources = srcs
+                filled.append(f"sources={srcs}")
+        if not narration:
+            if allow_caption and not b.caption:
+                cap = _clean_text(d.get("caption", ""), request)
+                if cap:
+                    b.caption = cap
+                    filled.append(f"caption={cap!r}")
+            if not b.target_dur:
+                dur = float(d.get("dur") or 0)
+                if dur > 0:
+                    b.target_dur = min(max(dur, DUR_MIN), DUR_MAX)
+                    filled.append(f"dur={b.target_dur:.0f}")
+        if filled:
+            print(f"     블록{i} ← {' '.join(filled)}")

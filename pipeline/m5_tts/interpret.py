@@ -171,7 +171,10 @@ def interpret_narration(request: str) -> EditPlan:
 
     # 자막 결정론 폴백: 요청이 텍스트 표시를 언급하는데 Gemma 가 caption 을 놓치면
     # (실측: 전 블록 누락) 내레이션 문장을 그대로 자막으로 — "띄워주면서 읽어줘" 관례.
-    wants_caption = ("텍스트" in request) or ("자막" in request)
+    # 부정 핀 우선("자막 없이"에는 "자막"이 포함된다 — _EDIT_PINS 와 같은 원칙).
+    from ..m6_edit.author import caption_forbidden
+    wants_caption = (not caption_forbidden(request)) and \
+        (("텍스트" in request) or ("자막" in request))
     blocks = []
     for s in sents:                       # 문장당 1호출 — 문장이 곧 블록(내레이션이 주인)
         b = _match_scene(s, request)

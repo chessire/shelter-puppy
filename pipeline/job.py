@@ -339,21 +339,28 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
     out_path = ws.out(out_name)
 
     def _maybe_author(plan, want_narration: bool):
-        """구조 없는 요청 → 저작(구성 작가). 소재 인지 창작이라 실행마다 다를 수 있음
-        (의도된 비결정 — --rerender = 구성 복권). 실패 시 번역 플랜 유지(안전한 저하)."""
-        from .m6_edit.author import author_plan, is_unstructured, script_invented
-        if not (is_unstructured(plan) or script_invented(plan, request)):
-            return plan
-        print("[저작] 요청에 구성 없음 → 관찰 프로필로 구성·대본 창작…")
-        authored = author_plan(request, ws, names, narration=want_narration)
-        if authored is None:
-            print("     저작 실패 — 번역 플랜으로 폴백")
-            return plan
-        for i, b in enumerate(authored.blocks):
-            print(f"     블록{i}: {b.sources} select={b.select} dur={b.target_dur} "
-                  f"zoom={b.zoom} caption={b.caption!r}"
-                  + (f" narration={b.narration!r}" if b.narration else ""))
-        return authored
+        """저작 3분기 — 구조 소유권은 이진, 빈칸 채움이 그라디언트(2026-07-03 설계).
+
+        ① 구조 없음(기본값 블록 1개/장님 작문) → 전체 저작(구성 작가)
+        ② 구조는 유저 것, 필드 일부 빈칸(자막·초·소재) → 부분 저작 + 결정론 병합
+           (유저 명시 필드는 저작 출력에서 읽지 않아 구조적으로 불변)
+        ③ 풀 스펙 → 저작 0호출
+        소재 인지 창작이라 실행마다 다를 수 있음(의도된 비결정 — --rerender = 복권).
+        실패 시 번역 플랜 유지(안전한 저하)."""
+        from .m6_edit.author import (author_plan, fill_plan, is_unstructured,
+                                     script_invented)
+        if is_unstructured(plan) or script_invented(plan, request):
+            print("[저작] 요청에 구성 없음 → 관찰 프로필로 구성·대본 창작…")
+            authored = author_plan(request, ws, names, narration=want_narration)
+            if authored is None:
+                print("     저작 실패 — 번역 플랜으로 폴백")
+                return plan
+            for i, b in enumerate(authored.blocks):
+                print(f"     블록{i}: {b.sources} select={b.select} dur={b.target_dur} "
+                      f"zoom={b.zoom} caption={b.caption!r}"
+                      + (f" narration={b.narration!r}" if b.narration else ""))
+            return authored
+        return fill_plan(request, ws, names, plan, narration=want_narration)
 
     if mode == "narration":
         print("[M5+M6] 대본 분해·합성·렌더…")
