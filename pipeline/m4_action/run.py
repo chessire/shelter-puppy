@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import math
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -136,16 +137,30 @@ def classify_segment(cap, boxes, f0, f1, fps, max_crops, motion_hint: str = ""):
     return llm_group, llm_conf, action
 
 
-def run(name: str, thr: float, fps: float, conf_thr: float, max_crops: int,
-        ws: Workspace | None = None) -> int:
-    ws = ws or Workspace.dev()
+def _motion_phase(name: str, thr: float, fps: float, ws: Workspace):
+    """M3 국면(순수 CPU) — 강아지 박스·모션곡선·동정 세그먼트. 박스 없으면 None.
+
+    Gemma 판정(ollama, 직렬 자원)과 분리한 이유: 이 부분은 파일 읽기+OpenCV 뿐이라
+    영상 간 팬아웃이 안전하고, run_many 가 판정 중에 다음 영상 곡선을 미리 돌린다.
+    """
     boxes = foster_boxes(name, ws)   # GT 있으면 GT, 없으면 pred(프로덕션)
     if not boxes:
-        print(f"[{name}] 강아지 박스 없음 — M1 pred 확인 필요. 건너뜀.")
-        return 1
-    mp4 = ws.analysis(name)
-    motion = compute_motion_curve(mp4, boxes)
+        return None
+    motion = compute_motion_curve(ws.analysis(name), boxes)
     segs, _ = segment_motion(motion, fps, thr)
+    return boxes, motion, segs
+
+
+def run(name: str, thr: float, fps: float, conf_thr: float, max_crops: int,
+        ws: Workspace | None = None, pre: tuple | None = None) -> int:
+    ws = ws or Workspace.dev()
+    if pre is None:
+        pre = _motion_phase(name, thr, fps, ws)
+        if pre is None:
+            print(f"[{name}] 강아지 박스 없음 — M1 pred 확인 필요. 건너뜀.")
+            return 1
+    boxes, motion, segs = pre
+    mp4 = ws.analysis(name)
 
     cap = cv2.VideoCapture(str(mp4))
     out: list[ActionSegment] = []
@@ -181,6 +196,28 @@ def run(name: str, thr: float, fps: float, conf_thr: float, max_crops: int,
     return 0
 
 
+def run_many(names: list[str], thr: float, fps: float, conf_thr: float,
+             max_crops: int, ws: Workspace | None = None) -> int:
+    """여러 영상 — M3 국면(CPU)은 팬아웃, Gemma 판정(ollama)은 순서대로 직렬.
+
+    영상 i 판정 중에 영상 i+1 의 모션곡선이 이미 돌고 있어 M3 비용이 판정 뒤로
+    숨는다. 병렬 구간은 파일 읽기·OpenCV 뿐 — meta 를 만지지 않는다(레이스 수칙).
+    """
+    ws = ws or Workspace.dev()
+    rc = 0
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(names)))) as pool:
+        futs = {n: pool.submit(_motion_phase, n, thr, fps, ws) for n in names}
+        for name in names:
+            pre = futs[name].result()
+            if pre is None:
+                print(f"[{name}] 강아지 박스 없음 — M1 pred 확인 필요. 건너뜀.")
+                rc = 1
+                continue
+            print(f"[M4] {name} 동작판정…")
+            run(name, thr, fps, conf_thr, max_crops, ws=ws, pre=pre)
+    return rc
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="m4_run")
     p.add_argument("names", nargs="*", help="영상 이름들 (기본: 테스트 5영상)")
@@ -191,9 +228,7 @@ def main(argv=None) -> int:
     p.add_argument("--max-crops", type=int, default=10, help="구간당 최대 크롭 수")
     args = p.parse_args(argv)
     names = args.names or ["IMG_0004", "IMG_0008", "IMG_9980", "IMG_0069", "IMG_0066"]
-    for n in names:
-        run(n, args.thr, args.fps, args.conf_thr, args.max_crops)
-    return 0
+    return run_many(names, args.thr, args.fps, args.conf_thr, args.max_crops)
 
 
 if __name__ == "__main__":

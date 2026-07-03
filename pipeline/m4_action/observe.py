@@ -28,6 +28,9 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -86,15 +89,20 @@ def _sample_frames(mp4: str, fracs: tuple) -> list[np.ndarray]:
 # 센서 ① 오디오 — AST(AudioSet 527) 이벤트 태깅. 원본에서 추출(분석 mp4 는 -an).
 # --------------------------------------------------------------------------- #
 _ast_cache: list = []
+# 센서 팬아웃(ensure_profiles) 시 지연 초기화가 스레드에서 경합하지 않게 — 이중 로드
+# (모델 2회 다운로드·메모리 2배) 방지. 추론 자체는 eval 모듈이라 동시 호출 안전.
+_init_lock = threading.Lock()
 
 
 def _ast():
     if not _ast_cache:
-        from transformers import ASTFeatureExtractor, ASTForAudioClassification
-        fe = ASTFeatureExtractor.from_pretrained(AST_MODEL)
-        model = ASTForAudioClassification.from_pretrained(AST_MODEL)
-        model.eval()
-        _ast_cache.append((fe, model))
+        with _init_lock:
+            if not _ast_cache:
+                from transformers import ASTFeatureExtractor, ASTForAudioClassification
+                fe = ASTFeatureExtractor.from_pretrained(AST_MODEL)
+                model = ASTForAudioClassification.from_pretrained(AST_MODEL)
+                model.eval()
+                _ast_cache.append((fe, model))
     return _ast_cache[0]
 
 
@@ -170,22 +178,24 @@ def _places_assets() -> None:
 
 def _places():
     if not _places_cache:
-        import torch
-        import torchvision.models as tvm
-        _places_assets()
-        ckpt_path = MODELS_DIR / "resnet18_places365.pth.tar"
-        model = tvm.resnet18(num_classes=365)
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        model.load_state_dict({k.replace("module.", ""): v
-                               for k, v in ckpt["state_dict"].items()})
-        model.eval()
-        cats = [line.strip().split(" ")[0][3:]
-                for line in (MODELS_DIR / "categories_places365.txt").read_text().splitlines()]
-        io_map = {}
-        for line in (MODELS_DIR / "IO_places365.txt").read_text().splitlines():
-            name, flag = line.strip().rsplit(" ", 1)
-            io_map[name[3:]] = int(flag)     # 1=indoor, 2=outdoor
-        _places_cache.append((model, cats, io_map))
+        with _init_lock:
+            if not _places_cache:
+                import torch
+                import torchvision.models as tvm
+                _places_assets()
+                ckpt_path = MODELS_DIR / "resnet18_places365.pth.tar"
+                model = tvm.resnet18(num_classes=365)
+                ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                model.load_state_dict({k.replace("module.", ""): v
+                                       for k, v in ckpt["state_dict"].items()})
+                model.eval()
+                cats = [line.strip().split(" ")[0][3:]
+                        for line in (MODELS_DIR / "categories_places365.txt").read_text().splitlines()]
+                io_map = {}
+                for line in (MODELS_DIR / "IO_places365.txt").read_text().splitlines():
+                    name, flag = line.strip().rsplit(" ", 1)
+                    io_map[name[3:]] = int(flag)     # 1=indoor, 2=outdoor
+                _places_cache.append((model, cats, io_map))
     return _places_cache[0]
 
 
@@ -242,8 +252,10 @@ _dino_cache: list = []
 
 def _dino():
     if not _dino_cache:
-        from ..m2_reid.embed import DinoEmbedder
-        _dino_cache.append(DinoEmbedder())
+        with _init_lock:
+            if not _dino_cache:
+                from ..m2_reid.embed import DinoEmbedder
+                _dino_cache.append(DinoEmbedder())
     return _dino_cache[0]
 
 
@@ -331,8 +343,12 @@ def caption(analysis_mp4: str | Path) -> str:
 # --------------------------------------------------------------------------- #
 # 프로필 빌드 + meta 캐시
 # --------------------------------------------------------------------------- #
-def build_profile(ws: Workspace, name: str) -> dict:
-    """영상 1개의 관찰 프로필. 축별 실패는 삼키고 빈 관찰(안전한 실패)."""
+def _sensor_profile(ws: Workspace, name: str) -> dict:
+    """센서 4축(오디오·배경벡터·장면분류·휘도) — 캡션 제외한 CPU 축.
+
+    축별 실패는 삼키고 빈 관찰(안전한 실패). ensure_profiles 가 영상 간 스레드로
+    팬아웃하는 단위라 meta 를 만지지 않는다(같은 잡 동시 쓰기 = 레이스 수칙).
+    """
     prof: dict = {}
     src = ws.source_video(name)
     try:
@@ -358,6 +374,12 @@ def build_profile(ws: Workspace, name: str) -> dict:
     except Exception as e:                    # noqa: BLE001
         print(f"     [관찰] {name} 휘도 실패: {e}")
         prof["luma"] = {"luma": None, "dark_frac": None, "dark": False}
+    return prof
+
+
+def build_profile(ws: Workspace, name: str) -> dict:
+    """영상 1개의 관찰 프로필(센서 4축 + 캡션). 축별 실패는 삼키고 빈 관찰."""
+    prof = _sensor_profile(ws, name)
     try:
         prof["caption"] = caption(ws.analysis(name))
     except Exception as e:                    # noqa: BLE001
@@ -370,15 +392,30 @@ def ensure_profiles(ws: Workspace, names: list[str]) -> dict[str, dict]:
     """meta.scene_profile 캐시 — 없는 영상만 빌드(요청 무관 재사용 자산).
 
     구버전 캐시(전파 벡터 없는 프로필)는 빠진 벡터만 채워 넣는다(마이그레이션).
+    속도: 센서 4축(CPU)은 영상 간 팬아웃, 캡션(Gemma)은 직렬 — ollama 는 서버가
+    요청을 직렬 처리하는 공유 자원이라 스레드를 늘려도 줄만 선다. 총시간 ≈
+    max(캡션 직렬 합, 센서 병렬 합). meta 쓰기는 루프 밖 1회.
     """
     meta = ws.read_meta()
     profiles = dict(meta.get("scene_profile") or {})
     todo = [n for n in names if n not in profiles]
     dirty = bool(todo)
-    for name in todo:
-        print(f"[관찰] {name} 프로필(오디오·장면·휘도·캡션)…")
-        profiles[name] = build_profile(ws, name)
-        print(f"     {profile_text(profiles[name])}")
+    if todo:
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=min(4, len(todo))) as pool:
+            futs = {n: pool.submit(_sensor_profile, ws, n) for n in todo}
+            for name in todo:
+                print(f"[관찰] {name} 프로필(오디오·장면·휘도·캡션)…")
+                try:
+                    cap_txt = caption(ws.analysis(name))
+                except Exception as e:        # noqa: BLE001
+                    print(f"     [관찰] {name} 캡션 실패: {e}")
+                    cap_txt = ""
+                prof = futs[name].result()
+                prof["caption"] = cap_txt
+                profiles[name] = prof
+                print(f"     {profile_text(prof)}")
+        print(f"[시간] 관찰 프로필 {len(todo)}영상 {time.time() - t0:.1f}s")
     for name in names:
         prof = profiles.get(name)
         if prof is None or name in todo:

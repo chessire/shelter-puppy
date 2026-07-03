@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .harness import io
 from .m1_track.run import run as m1_run
-from .m4_action.run import run as m4_run
+from .m4_action.run import run_many as m4_run_many
 from .m5_tts import DEFAULT_VOICE
 from .m5_tts.interpret import decide_mode, interpret_narration
 from .m5_tts.render import render_narrated
@@ -133,6 +135,7 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
         raise SystemExit(f"{ws.root}: input/ 에 영상이 없음. init_job 먼저.")
     ws.update_meta(state="validated", sources=names)
 
+    todo: list[str] = []
     for name in names:
         # 재실행(다견 확정 후 등) 시 P0/M1 재계산 방지 — 분석은 영상당 1회(M4 재사용과 동일 결).
         # 재사용 조건에 '검출 0이 아님'을 포함 — P0 산출물이 깨지면(실측: NAL 오류 mp4)
@@ -144,12 +147,23 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
         if ws.preds_m1(name).exists():
             print(f"[P0+M1] {name} 빈 pred 감지 — 정규화·검출 재시도")
             ws.analysis(name).unlink(missing_ok=True)
-        src = ws.source_video(name)
-        print(f"[P0] {name} 정규화…")
-        normalize(src, ws.analysis_dir)
-        print(f"[M1] {name} 검출…")
-        s = m1_run(str(ws.analysis(name)), str(ws.preds_m1(name)), weights=weights, conf=conf)
-        print(f"     frames={s['frames']} boxes={s['boxes']} tracks={s['tracks']}")
+        todo.append(name)
+    if todo:
+        t0 = time.time()
+        # P0(ffmpeg, CPU)는 팬아웃, M1(YOLO, GPU)은 그 뒤를 순서대로 — 영상 i 검출 중에
+        # 영상 i+1 정규화가 이미 돌아 P0 비용이 M1 뒤로 숨는다. 병렬 구간은 영상별
+        # 산출물 파일만 쓰고 잡 meta 를 만지지 않는다(같은 잡 동시 쓰기 = 레이스 수칙).
+        with ThreadPoolExecutor(max_workers=min(3, len(todo))) as pool:
+            futs = {n: pool.submit(normalize, ws.source_video(n), ws.analysis_dir)
+                    for n in todo}
+            for name in todo:
+                print(f"[P0] {name} 정규화…")
+                futs[name].result()
+                print(f"[M1] {name} 검출…")
+                s = m1_run(str(ws.analysis(name)), str(ws.preds_m1(name)),
+                           weights=weights, conf=conf)
+                print(f"     frames={s['frames']} boxes={s['boxes']} tracks={s['tracks']}")
+        print(f"[시간] P0+M1 {len(todo)}영상 {time.time() - t0:.1f}s")
 
     # 강아지 후보: 영상별 유의미 dog 트랙 수. 어느 영상이든 2마리+면 다견.
     per_video = {name: _dog_tracks(ws, name, min_track_frac) for name in names}
@@ -328,12 +342,17 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
 
     voice = voice or meta.get("voice") or DEFAULT_VOICE
     ws.update_meta(state="rendering", request=request, mode=mode, voice=voice)
+    pending = []
     for name in names:
         if ws.preds_m4(name).exists():
             print(f"[M4] {name} 태그 재사용")
-            continue
-        print(f"[M4] {name} 동작판정…")
-        m4_run(name, thr, fps, conf_thr, max_crops, ws=ws)
+        else:
+            pending.append(name)
+    if pending:
+        t0 = time.time()
+        # M3 곡선(CPU)은 영상 간 팬아웃, Gemma 판정(ollama)은 직렬 — run_many 참고.
+        m4_run_many(pending, thr, fps, conf_thr, max_crops, ws=ws)
+        print(f"[시간] M4 {len(pending)}영상 {time.time() - t0:.1f}s")
 
     sources = [(str(ws.analysis(n)), str(ws.preds_m4(n))) for n in names]
     out_path = ws.out(out_name)

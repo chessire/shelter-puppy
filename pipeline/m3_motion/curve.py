@@ -54,11 +54,14 @@ def compute_motion_curve(analysis_mp4: Path, boxes: dict[int, BBox]) -> dict[int
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     motion: dict[int, float] = {}
     prev_gray = None
-    prev_idx = None
 
     idxs = sorted(boxes)
-    for idx in range(min(idxs), max(idxs) + 1):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    start = idxs[0]
+    # 순차 디코드 — 프레임마다 cap.set(랜덤 시크)하면 매번 키프레임부터 재디코드라
+    # 수 배 느리다. 분석 mp4 는 P0 CFR 계약이라 순차 read 가 같은 프레임을 준다.
+    if start:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    for idx in range(start, idxs[-1] + 1):
         ok, frame = cap.read()
         if not ok:
             break
@@ -85,7 +88,6 @@ def compute_motion_curve(analysis_mp4: Path, boxes: dict[int, BBox]) -> dict[int
             if roi_c.size > 0 and roi_c.shape == roi_p.shape:
                 motion[idx] = float(np.abs(roi_c - roi_p).mean())
         prev_gray = gray
-        prev_idx = idx
     cap.release()
     return motion
 
