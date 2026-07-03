@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 
-from . import EditBlock, EditPlan
+from . import TEXT_POSITIONS, EditBlock, EditPlan
 from ..workspace import Workspace
 
 MODEL = "gemma4:26b-a4b-it-q4_K_M"
@@ -119,6 +119,8 @@ def _schema(names: list[str]) -> dict:
         "dur": {"type": "number"},
         "zoom": {"type": "string", "enum": ["none", "gradual"]},
         "caption": {"type": "string"},
+        "caption_pos": {"type": "string", "enum": list(TEXT_POSITIONS)},
+        "caption_span": {"type": "array", "items": {"type": "number"}},
         "narration": {"type": "string"},
     }, "required": ["sources", "select", "dur", "caption"]}   # dur 필수 — 미기입 시
     # 블록이 pace 기본값(컷당 2초)으로 흘러 총 길이가 목표 미달(실측 12.2s)
@@ -159,9 +161,15 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         "- dur: 블록 길이(초, 3~10)\n"
         "- zoom: 얼굴·첫인상을 천천히 당겨 보여줄 블록만 gradual(차분한 구간에서), "
         "아니면 none\n"
-        "- caption: 화면 하단 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
+        "- caption: 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
         "문장으로 써라(요청문을 옮겨 적지 마라). 강아지 이름과 고객의 말투는 "
         "따른다. 매 블록 반드시 채운다(빈 문자열 금지).\n"
+        "- caption_pos: 자막 위치(bottom/top/left/right/top-left/top-right/"
+        "bottom-left/bottom-right) — 기본 bottom, 연출상 필요할 때만 변경. "
+        "텍스트끼리 겹치지 않게 하라: title 을 채웠으면 블록 자막은 top 을 피하고, "
+        "우상단(top-right)엔 AI 표시가 있으니 되도록 피한다.\n"
+        "- caption_span: 자막이 장면에 맞춰 떴다 사라지게 하고 싶으면 블록 길이 "
+        "대비 [시작,끝] 0~1 비율(예: [0.2,0.8]), 내내 표시면 생략\n"
         "- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
         "- title: 화면에 박을 *영상 자체의* 짧은 제목(요청문을 설명하는 '~만들기' "
         "같은 문구가 아니다), 필요 없으면 빈 문자열\n"
@@ -197,6 +205,8 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
             "zoom": d.get("zoom", "none"),
             "caption": (_watch_echo(d.get("caption", ""), request, "caption")
                         if allow_caption else ""),
+            "caption_pos": d.get("caption_pos"),
+            "caption_span": d.get("caption_span"),
             "narration": (_watch_echo(d.get("narration", ""), request, "narration")
                           if narration else ""),
             "sources": srcs,
@@ -250,7 +260,12 @@ def fill_plan(request: str, ws: Workspace, names: list[str],
     갭이 없으면 LLM 0호출로 plan 그대로(풀 스펙 요청 = 저작 기여 0으로 수렴).
     채움 실패(JSON 2회)도 plan 그대로 — 기본값 렌더가 폴백(안전한 저하).
     """
-    allow_caption = not caption_forbidden(request)
+    # 텍스트 소유권 이진(2026-07-03 사용자): 요청에 텍스트 번인 지시가 하나라도
+    # 있으면(= 번역 결과에 유저 자막 존재) 자막은 통째로 유저 소유 — 저작은 빈
+    # 블록의 자막도 채우지 않는다("지시가 하나라도 있으면 저작은 아예 없음").
+    # 지시가 전혀 없을 때만 자막·위치·표시구간이 저작 재량이 된다.
+    user_texted = any((b.caption or "").strip() for b in plan.blocks)
+    allow_caption = not caption_forbidden(request) and not user_texted
     gaps = field_gaps(plan, narration, allow_caption)
     if not gaps:
         return plan
@@ -328,7 +343,10 @@ def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
                 cap = _watch_echo(d.get("caption", ""), request, "caption")
                 if cap:
                     b.caption = cap
-                    filled.append(f"caption={cap!r}")
+                    if d.get("caption_pos") in TEXT_POSITIONS:
+                        b.caption_pos = d["caption_pos"]
+                    b.caption_span = EditBlock._clean_span(d.get("caption_span"))
+                    filled.append(f"caption={cap!r}@{b.caption_pos}")
             if not b.target_dur:
                 dur = float(d.get("dur") or 0)
                 if dur > 0:

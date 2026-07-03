@@ -24,7 +24,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import EditBlock, EditPlan, PLAN_SCHEMA
+from . import TEXT_POSITIONS, EditBlock, EditPlan, PLAN_SCHEMA
 from ..harness import io
 from ..m4_action import foster_track, is_trick
 from ..m4_action.gt_scaffold import foster_boxes as _foster_boxes_provider
@@ -71,8 +71,14 @@ def interpret_plan(request: str) -> EditPlan:
         "- subject: 강아지를 화면 주인공으로 당겨라=foster, 전체화면=full\n"
         "- zoom: 점점 확대/클로즈업=gradual(정적 구간에만), 아니면 none\n"
         "- speed: 요청이 슬로우/배속을 *명시*한 경우만(슬로우=0.5, 빠르게=2), 아니면 1\n"
-        "- caption: 그 블록 동안 화면 아래 띄울 한글 자막. 없으면 빈 문자열.\n"
+        "- caption: 그 블록 동안 띄울 한글 자막. 없으면 빈 문자열.\n"
         "  ('~를 텍스트로 띄워줘/자막' 같은 말은 그 블록 caption 으로.)\n"
+        "- caption_pos: 고객이 자막 *위치*를 명시한 경우만 — 아래=bottom, 위=top, "
+        "오른쪽=right, 왼쪽=left, 구석은 top-left/top-right/bottom-left/bottom-right. "
+        "언급 없으면 bottom.\n"
+        "- caption_span: 고객이 자막이 *뜨고 사라지는 타이밍*을 명시한 경우만 — "
+        "블록 길이 대비 [시작,끝] 0~1 비율(예: 중간부터 끝까지=[0.5,1], "
+        "잠깐 떴다 사라지게=[0,0.4]). 언급 없으면 생략(블록 내내 표시).\n"
         "- keywords: 그 블록이 원하는 *장면/장소/상황* 키워드 배열. 예: 애견카페→[\"카페\"], "
         "산책→[\"산책\"], 비오는 날→[\"비\"], 밤→[\"밤\"], 하이파이브→[\"하이파이브\"]. "
         "장면 언급 없으면 빈 배열. (이걸로 어느 영상을 쓸지 거른다.)\n"
@@ -372,23 +378,101 @@ def _extract_clip(intent: EditBlock, mp4: str, t0: float, t1: float,
 # --------------------------------------------------------------------------- #
 # 4) 제목 번인 (PIL → overlay) / 배속
 # --------------------------------------------------------------------------- #
-def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
-    """텍스트 PNG — pos: bottom=블록 자막 / top=전역 title.
+def _wrap_lines(text: str, font, measure, max_w: float) -> list[str]:
+    """긴 텍스트 자동 개행 — 공백 단위 우선, 공백 없는 긴 조각은 글자 단위 하드랩.
 
-    둘을 같은 자리(하단)에 그리면 title 이 상시 깔린 위에 블록 자막이 겹친다
-    (실측: 저작이 title 을 채우면서 처음 드러난 조합 — 이전 데모는 title 이 빈 값).
-    title 은 상단 중앙, AI 배지 safe-zone(상단 10%) 아래.
+    실측(complicated-demo2): 저작 자막이 화면 폭을 넘어 잘림. measure = 픽셀 폭 함수.
+    """
+    lines, cur = [], ""
+    for word in text.split(" "):
+        cand = f"{cur} {word}".strip()
+        if not cur or measure(cand, font) <= max_w:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    out = []
+    for ln in lines:                        # 한 단어가 폭 초과(공백 없는 긴 한글)
+        while measure(ln, font) > max_w and len(ln) > 1:
+            k = len(ln) - 1
+            while k > 1 and measure(ln[:k], font) > max_w:
+                k -= 1
+            out.append(ln[:k])
+            ln = ln[k:]
+        out.append(ln)
+    return out
+
+
+def _text_anchor(pos: str, W: int, H: int, lh: float) -> tuple[float, float]:
+    """4방위(중심 대칭) 영역 → 블록 중심점 (cx, cy)."""
+    cx = {"left": W * 0.28, "right": W * 0.72}.get(pos, W / 2)
+    if pos == "top":
+        # top 행을 AI 배지·안내 밴드(상단 10~16%H) 아래로 — 전역 title(상시)과
+        # 배지(상시)는 반드시 공존하므로 같은 높이대면 긴 title 이 안내 줄을 침범
+        # (콜라주 실측). 쇼츠 상단 UI safe-zone 관점에서도 낮은 쪽이 안전.
+        cy = H * 0.20 + lh / 2
+    elif pos == "bottom":
+        cy = H - max(30, H // 12) - lh / 2
+    else:                                   # left | right — 세로 중앙
+        cy = H / 2
+    return cx, cy
+
+
+def _block_origin(pos: str, W: int, H: int, block_w: float, block_h: float,
+                  lh: float) -> tuple[float, float, str]:
+    """블록 원점(x0, y0)과 줄 정렬 — 4방위=중심 고정 대칭 / 네 구석=모서리 정렬.
+
+    구석(2026-07-03 사용자): 왼쪽 구석은 왼쪽 정렬로 코너에 붙어 안쪽으로,
+    오른쪽 구석은 오른쪽 정렬로 안쪽으로 자란다(중앙 대칭 아님). top-right 만
+    AI 배지+안내 두 줄(상단 10~16%H) 아래에서 시작.
+    """
+    if "-" in pos:
+        col = pos.split("-")[1]
+        mx = W * 0.05                       # 배지와 같은 좌우 5% 오프셋
+        x0 = mx if col == "left" else W - mx - block_w
+        if pos == "top-right":
+            y0 = H * 0.18                   # 배지·안내 줄 아래(배경 박스 패딩 여유 포함)
+        elif pos == "top-left":
+            y0 = H * 0.10                   # 배지 라인 높이(좌측은 비어 있음)
+        else:                               # bottom 구석 — 하단 여백에서 위로 자람
+            y0 = H - max(30, H // 12) - block_h
+        return x0, y0, col
+    cx, cy = _text_anchor(pos, W, H, lh)
+    x0 = min(max(cx - block_w / 2, 24), W - block_w - 24)
+    return x0, cy - block_h / 2, "center"
+
+
+def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
+    """텍스트 PNG — 8방위 영역, 자동 개행.
+
+    4방위(top/bottom/left/right) = 중심 고정, 여러 줄이면 상하·좌우 대칭 성장.
+    네 구석 = 모서리 정렬(왼쪽 구석 왼쪽 정렬·오른쪽 구석 오른쪽 정렬), 안쪽으로 성장.
+    상/하 중앙 행은 화면 폭 86%, 좌/우·구석은 40%로 개행해 영역감 유지.
     """
     from PIL import Image, ImageDraw, ImageFont
+    if pos not in TEXT_POSITIONS:
+        pos = "bottom"
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     font = ImageFont.truetype(_KFONT, max(28, W // 18))
-    bb = d.textbbox((0, 0), text, font=font)
-    tw, th = bb[2] - bb[0], bb[3] - bb[1]
-    x = (W - tw) // 2
-    y = (max(30, H // 8) if pos == "top" else H - th - max(30, H // 12))
-    d.rectangle([x - 18, y - 14, x + tw + 18, y + th + 18], fill=(0, 0, 0, 150))
-    d.text((x - bb[0], y - bb[1]), text, font=font, fill=(255, 255, 255, 255))
+    max_w = int(W * (0.40 if "-" in pos or pos in ("left", "right") else 0.86))
+    lines = _wrap_lines(text, font, d.textlength, max_w)
+    ascent, descent = font.getmetrics()
+    lh = ascent + descent
+    gap = lh // 4
+    block_h = len(lines) * lh + (len(lines) - 1) * gap
+    widths = [d.textlength(ln, font=font) for ln in lines]
+    block_w = max(widths)
+    x0, y0, align = _block_origin(pos, W, H, block_w, block_h, lh)
+    d.rectangle([x0 - 18, y0 - 14, x0 + block_w + 18, y0 + block_h + 18],
+                fill=(0, 0, 0, 150))
+    for i, ln in enumerate(lines):
+        lx = (x0 if align == "left"
+              else x0 + block_w - widths[i] if align == "right"
+              else x0 + (block_w - widths[i]) / 2)
+        d.text((lx, y0 + i * (lh + gap)), ln, font=font, fill=(255, 255, 255, 255))
     img.save(out)
 
 
@@ -423,14 +507,20 @@ def _apply_speed(src: Path, speed: float, out: Path):
 
 
 def _overlay_text(src: Path, text: str, out: Path, size: tuple[int, int],
-                  pos: str = "bottom"):
-    """src 영상에 한글 텍스트(PIL→overlay) 박아 out 으로. 빈 텍스트면 그대로 복사."""
+                  pos: str = "bottom", window: tuple[float, float] | None = None):
+    """src 영상에 한글 텍스트(PIL→overlay) 박아 out 으로. 빈 텍스트면 그대로 복사.
+
+    window=(t0,t1)초 — 그 구간에만 표시(자막이 생기고 사라지는 타이밍, caption_span).
+    """
     if not text:
         src.replace(out); return
     png = out.with_name(out.stem + "_txt.png")
     _title_png(text, size[0], size[1], png, pos=pos)
+    ov = "[0:v][1:v]overlay=0:0"
+    if window is not None:
+        ov += f":enable='between(t,{window[0]:.2f},{window[1]:.2f})'"
     subprocess.run(["ffmpeg", "-y", "-i", str(src), "-i", str(png),
-                    "-filter_complex", "[0:v][1:v]overlay=0:0", "-c:v", "libx264",
+                    "-filter_complex", ov, "-c:v", "libx264",
                     "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)],
                    check=True, capture_output=True)
     png.unlink(missing_ok=True)
@@ -460,7 +550,13 @@ def render_block(block: EditBlock, sources, tmp: Path, idx: int,
         _apply_speed(vid, block.speed, sped); vid = sped
     if block.caption:                       # 블록별 자막을 그 블록에만 박는다
         cap = tmp / f"b{idx}_cap.mp4"
-        _overlay_text(vid, block.caption, cap, size); vid = cap
+        win = None
+        if block.caption_span:              # [비율] → 실측 블록 길이 기준 초
+            bd = _probe_dur(str(vid))
+            win = (block.caption_span[0] * bd, block.caption_span[1] * bd)
+        _overlay_text(vid, block.caption, cap, size, pos=block.caption_pos,
+                      window=win)
+        vid = cap
     return vid, clips
 
 

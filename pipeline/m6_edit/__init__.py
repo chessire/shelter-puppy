@@ -15,6 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+# 텍스트 영역 8방위(2026-07-03 사용자 설계) — title/자막의 의미 구분이 아니라 *위치*.
+# 각 영역의 앵커(중심)가 고정, 블록은 중심에서 상하·좌우 대칭으로 자란다(run._title_png).
+# top-right 는 AI 배지(상단 10~16%H)를 피해서 앉는다.
+TEXT_POSITIONS = ("top", "bottom", "left", "right",
+                  "top-left", "top-right", "bottom-left", "bottom-right")
+
 # 블록 1개의 JSON 스키마(Gemma format= 강제). 고수준 의도만, 실제 구간은 컴파일러가.
 _BLOCK_PROPS = {
     "select": {"type": "string", "enum": ["dynamic", "static", "all", "묘기"]},
@@ -24,7 +30,11 @@ _BLOCK_PROPS = {
     "subject": {"type": "string", "enum": ["foster", "full"]},
     "zoom": {"type": "string", "enum": ["none", "gradual"]},
     "speed": {"type": "number"},
-    "caption": {"type": "string"},      # 이 블록 동안 아래에 띄울 한글 자막. 없으면 빈 문자열.
+    "caption": {"type": "string"},      # 이 블록 동안 띄울 한글 자막. 없으면 빈 문자열.
+    "caption_pos": {"type": "string", "enum": list(TEXT_POSITIONS)},  # 자막 위치(기본 bottom)
+    # 자막 표시 구간(블록 길이 대비 [시작,끝] 0~1 비율) — 생기고 사라지는 타이밍.
+    # 명시/저작이 없으면 블록 전체 표시(None).
+    "caption_span": {"type": "array", "items": {"type": "number"}},
     "keywords": {"type": "array", "items": {"type": "string"}},  # 장면 키워드(사용자 표현 그대로)
     # ⚠️ 함의 키워드("keywords_implied" — 카페→실내 같은 유추 속성)는 기각(2026-07-03,
     # 사용자 반례): ①틀린 함의(실내 수영장인데 실외 유추 → 오배정) ②블록 간 공유
@@ -62,6 +72,8 @@ class EditBlock:
     zoom: str = "none"           # none|gradual (정적 구간 권장)
     speed: float = 1.0           # 재생속도 배율
     caption: str = ""            # 이 블록 동안 띄울 자막(빈값=없음)
+    caption_pos: str = "bottom"  # 자막 위치(TEXT_POSITIONS 중 하나)
+    caption_span: Optional[list] = None   # [시작,끝] 0~1 비율(None=블록 전체 표시)
     keywords: list = None        # 장면 키워드(사용자 표현) — 매칭+핀. 비면 전체 소스.
     scene: str = ""              # 장면 묘사 문구(요청 표현 그대로) — 추론 대조용(예비)
     narration: str = ""          # 모드 A: 이 블록 동안 읽을 내레이션 구절(빈값=무음 블록)
@@ -69,6 +81,18 @@ class EditBlock:
     # 골랐으므로 키워드 매칭 왕복 없이 그 소스만 쓴다(핀·예약 의미론 동일). 번역
     # 프롬프트(_BLOCK_PROPS)에는 없다 — interpret 가 이름을 지어내면 안 되므로.
     sources: list = None
+
+    @staticmethod
+    def _clean_span(v) -> Optional[list]:
+        """[시작,끝] 0~1 클램프·정합 소독 — 창이 5% 미만이거나 역순·비수치면 None(전체)."""
+        if not (isinstance(v, (list, tuple)) and len(v) == 2):
+            return None
+        try:
+            a, b = float(v[0]), float(v[1])
+        except (TypeError, ValueError):
+            return None
+        a, b = max(0.0, min(1.0, a)), max(0.0, min(1.0, b))
+        return [a, b] if b - a >= 0.05 else None
 
     @classmethod
     def from_dict(cls, d: dict) -> "EditBlock":
@@ -82,6 +106,9 @@ class EditBlock:
             zoom=str(d.get("zoom", "none")),
             speed=(float(sp) if sp else 1.0),
             caption=str(d.get("caption", "") or ""),
+            caption_pos=(str(d.get("caption_pos")) if d.get("caption_pos") in TEXT_POSITIONS
+                         else "bottom"),
+            caption_span=cls._clean_span(d.get("caption_span")),
             keywords=[str(k) for k in (d.get("keywords") or [])],
             scene=str(d.get("scene", "") or ""),
             narration=str(d.get("narration", "") or ""),

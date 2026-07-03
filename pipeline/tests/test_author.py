@@ -188,14 +188,15 @@ def test_fill_plan_merge_preserves_user_fields(monkeypatch, tmp_path):
     plan = EditPlan(blocks=[user_b0, empty_b1])
     reply = json.dumps({"blocks": [
         {"caption": "덮어쓰기 시도", "dur": 9, "sources": ["IMG_B"]},   # 전부 무시돼야
-        {"caption": "신나게 놀아요!", "dur": 7, "sources": ["IMG_B", "IMG_Z"]},
+        {"caption": "저작 자막", "dur": 7, "sources": ["IMG_B", "IMG_Z"]},
     ]})
     fake = _FakeOllama([reply])
     monkeypatch.setitem(sys.modules, "ollama", fake)
     out = fill_plan("소개 영상, 놀다가 산책", ws, names, plan, narration=False)
     b0, b1 = out.blocks
     assert (b0.caption, b0.target_dur) == ("유저 자막", 5.0) and not b0.sources  # 불변
-    assert b1.caption == "신나게 놀아요!" and b1.target_dur == 7.0
+    assert b1.caption == ""                # 유저 자막 존재 → 텍스트 소유권 이진(채움 금지)
+    assert b1.target_dur == 7.0            # 비텍스트 필드는 채움
     assert b1.sources == ["IMG_B"]                     # 환각 IMG_Z 소독
     assert "확정된 구성" in fake.prompts[0] and "유저 자막" in fake.prompts[0]
 
@@ -271,6 +272,79 @@ def test_compile_short_block_unaffected(tmp_path):
     clips = compile_editlist(EditBlock(select="dynamic", target_dur=2.0),
                              sources, ws=Workspace(tmp_path))
     assert len(clips) == 2                             # 1.0초 ≥ floor(=per 1.0) 유지
+
+
+# ── 자막 자동 개행 (실측: 긴 저작 자막이 화면 폭 초과로 잘림) ──────────────
+
+def test_text_anchor_regions():
+    """4방위(중심 대칭) — top 은 AI 배지 밴드(≈16%H) 아래, 좌/우는 세로 중앙."""
+    from pipeline.m6_edit.run import _text_anchor
+    W, H, lh = 1080, 1920, 90
+    assert _text_anchor("top", W, H, lh)[0] == W / 2
+    assert _text_anchor("left", W, H, lh) == (W * 0.28, H / 2)
+    assert _text_anchor("right", W, H, lh) == (W * 0.72, H / 2)
+    assert _text_anchor("top", W, H, lh)[1] - lh / 2 >= H * 0.16   # 배지·안내 회피
+
+
+def test_block_origin_corners():
+    """네 구석 = 모서리 정렬(코너에 붙어 안쪽으로 성장), top-right 는 배지 아래."""
+    from pipeline.m6_edit.run import _block_origin
+    W, H, lh, bw, bh = 1080, 1920, 90, 400, 200
+    x, y, align = _block_origin("top-left", W, H, bw, bh, lh)
+    assert (x, align) == (W * 0.05, "left")            # 왼쪽 위정렬
+    x, y, align = _block_origin("top-right", W, H, bw, bh, lh)
+    assert (x + bw, align) == (W * 0.95, "right")      # 오른쪽 위정렬
+    assert y >= H * 0.16                               # 배지·안내 아래에서 시작
+    x, y, align = _block_origin("bottom-left", W, H, bw, bh, lh)
+    assert align == "left" and y + bh == H - max(30, H // 12)   # 아래정렬(위로 성장)
+    x, y, align = _block_origin("bottom-right", W, H, bw, bh, lh)
+    assert align == "right" and x + bw == W * 0.95
+    assert _block_origin("bottom", W, H, bw, bh, lh)[2] == "center"   # 4방위는 중심 대칭
+
+
+def test_caption_span_sanitize():
+    assert EditBlock.from_dict({"select": "all", "caption_span": [0.2, 0.8]}).caption_span == [0.2, 0.8]
+    assert EditBlock.from_dict({"select": "all", "caption_span": [-1, 2]}).caption_span == [0.0, 1.0]
+    assert EditBlock.from_dict({"select": "all", "caption_span": [0.8, 0.2]}).caption_span is None
+    assert EditBlock.from_dict({"select": "all", "caption_span": [0.5]}).caption_span is None
+    assert EditBlock.from_dict({"select": "all"}).caption_span is None
+
+
+def test_fill_plan_user_text_ownership(monkeypatch, tmp_path):
+    """텍스트 소유권 이진 — 유저 자막이 하나라도 있으면 저작은 자막을 아예 안 채움."""
+    names = ["IMG_A", "IMG_B"]
+    ws = _ws_with_profiles(tmp_path, names)
+    plan = EditPlan(blocks=[EditBlock(keywords=["산책"], caption="유저 자막", target_dur=5.0),
+                            EditBlock(select="dynamic")])          # 자막 없는 블록
+    reply = json.dumps({"blocks": [{}, {"caption": "저작 자막", "dur": 7,
+                                        "sources": ["IMG_B"]}]})
+    fake = _FakeOllama([reply])
+    monkeypatch.setitem(sys.modules, "ollama", fake)
+    out = fill_plan("자막은 유저 자막 으로, 나머지 알아서", ws, names, plan, narration=False)
+    assert out.blocks[1].caption == ""                 # 자막은 유저 소유 — 채움 금지
+    assert out.blocks[1].target_dur == 7.0             # 비텍스트 필드는 채움
+    assert out.blocks[1].sources == ["IMG_B"]
+
+
+def test_caption_pos_sanitize():
+    assert EditBlock.from_dict({"select": "all", "caption_pos": "right"}).caption_pos == "right"
+    assert EditBlock.from_dict({"select": "all", "caption_pos": "가운데"}).caption_pos == "bottom"
+    assert EditBlock.from_dict({"select": "all"}).caption_pos == "bottom"
+
+
+def test_wrap_lines():
+    from pipeline.m6_edit.run import _wrap_lines
+    measure = lambda s, f: len(s) * 10          # 글자당 10px 가짜 측정
+    # 공백 단위 개행 — 각 줄이 폭 이내, 내용 보존
+    lines = _wrap_lines("가나다 라마바 사아자", None, measure, 75)
+    assert lines == ["가나다 라마바", "사아자"]
+    assert all(measure(ln, None) <= 75 for ln in lines)
+    # 공백 없는 긴 조각 → 글자 단위 하드랩
+    lines = _wrap_lines("가나다라마바사아자차", None, measure, 40)
+    assert all(measure(ln, None) <= 40 for ln in lines)
+    assert "".join(lines) == "가나다라마바사아자차"
+    # 짧은 텍스트는 한 줄 그대로
+    assert _wrap_lines("짧다", None, measure, 100) == ["짧다"]
 
 
 # ── 블록 소스 필터 (저작 직접 지정 우선, 전멸 시 키워드 폴백) ──────────────
