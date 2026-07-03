@@ -52,6 +52,7 @@ def test_clean_text_request_echo():
     assert _clean_text("우리 토리 소개 영상 만들어줘 (가족이 되어주세요!)", req) \
         == "가족이 되어주세요!"
     assert _clean_text("우리 토리 소개 영상 만들어줘", req) == ""
+    assert _clean_text("우리 토리 소개 영상 만들어줘!", req) == ""   # 잔여 구두점(실측 '!')
     assert _clean_text("가족이 되어주세요!", req) == "가족이 되어주세요!"   # 무관 텍스트 보존
 
 

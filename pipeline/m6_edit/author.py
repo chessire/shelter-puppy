@@ -46,7 +46,24 @@ def _clean_text(t: str, request: str) -> str:
     req = request.strip()
     if t and req and req in t:
         t = t.replace(req, "").strip(" ()[]{}·—–\-,:;'\"")
+        # 복창을 걷어낸 잔여가 구두점뿐이면 통째로 비움(실측: caption='!').
+        # strip 집합에 !? 를 넣으면 정상 자막의 문장부호까지 먹는다 — 잔여 검사로만.
+        if not re.search(r"[가-힣a-zA-Z0-9]", t):
+            t = ""
     return t
+
+
+def _watch_echo(t: str, request: str, where: str) -> str:
+    """복창 안전망 + 관측 — 발동은 프롬프트 오염 신호다(원인은 프롬프트에서 고친다).
+
+    사용자 지적(2026-07-03): 소독으로 잔여물('!')을 다듬는 건 증상 치료 — 병인은
+    '말투를 그대로 살려서' 류의 인용 초대 문구였다(프롬프트에서 제거). 이 안전망이
+    자주 발동하면 프롬프트가 다시 오염된 것이니 경고를 남긴다.
+    """
+    req = request.strip()
+    if t and req and req in t:
+        print(f"     [저작] ⚠️ 요청문 복창 감지({where}) → 제거 — 프롬프트 점검 신호")
+    return _clean_text(t, request)
 
 
 def is_unstructured(plan: EditPlan) -> bool:
@@ -126,9 +143,14 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         # ⚠️ 프레이밍 상수 금지(2026-07-03 사용자): '임시보호/입양/홍보' 같은 목적을
         # 프롬프트가 주입하면 요청에 없는 문구("Adopt Me!"·"[임시보호]")가 제목·자막에
         # 샌다(실측). 영상의 목적·톤은 오직 고객 요청에서 온다.
-        "너는 강아지 영상의 구성 작가다. 아래는 고객 요청과, 쓸 수 "
-        "있는 소재(영상별 관찰 기록 — 기계 측정이라 오류 가능)다.\n\n"
-        f"고객 요청: {request}\n\n소재:\n{records}\n\n"
+        # ⚠️ 요청문 = 지시문(2026-07-03 사용자): "말투를 그대로 살려서" 류의 문구는
+        # 요청문 인용 초대장이 된다(실측: caption 에 요청 전문 복창). 요청은 해석
+        # 대상이고 자막·제목은 시청자에게 말하는 새 문장이라고 명시한다.
+        "너는 강아지 영상의 구성 작가다. 아래 '고객 요청'은 너에게 주는 *지시문*"
+        "이고, 요청문 자체는 영상에 들어갈 내용이 아니다 — 요청이 말하는 목적과 "
+        "말투를 파악해 영상을 기획하라.\n\n"
+        f"고객 요청: {request}\n\n"
+        f"소재(영상별 관찰 기록 — 기계 측정이라 오류 가능):\n{records}\n\n"
         "이 소재들만으로 요청의 목적에 맞는 세로 숏폼(총 20~35초)을 기획하라. "
         "구성(흐름·순서·분위기)은 네가 정한다. 시간 순서대로 블록 3~6개, 각 블록:\n"
         "- sources: 그 블록에 어울리는 소재 이름 1~3개(관찰 기록을 근거로 고른다)\n"
@@ -137,8 +159,9 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         "- dur: 블록 길이(초, 3~10)\n"
         "- zoom: 얼굴·첫인상을 천천히 당겨 보여줄 블록만 gradual(차분한 구간에서), "
         "아니면 none\n"
-        "- caption: 화면 하단 자막 한 문장 — 고객 요청의 말투·호칭·이름을 그대로 "
-        "살려서. 매 블록 반드시 채운다(빈 문자열 금지).\n"
+        "- caption: 화면 하단 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
+        "문장으로 써라(요청문을 옮겨 적지 마라). 강아지 이름과 고객의 말투는 "
+        "따른다. 매 블록 반드시 채운다(빈 문자열 금지).\n"
         "- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
         "- title: 화면에 박을 *영상 자체의* 짧은 제목(요청문을 설명하는 '~만들기' "
         "같은 문구가 아니다), 필요 없으면 빈 문자열\n"
@@ -172,9 +195,9 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
             "select": d.get("select", "all"),
             "target_dur": (min(max(dur, DUR_MIN), DUR_MAX) if dur > 0 else None),
             "zoom": d.get("zoom", "none"),
-            "caption": (_clean_text(d.get("caption", ""), request)
+            "caption": (_watch_echo(d.get("caption", ""), request, "caption")
                         if allow_caption else ""),
-            "narration": (_clean_text(d.get("narration", ""), request)
+            "narration": (_watch_echo(d.get("narration", ""), request, "narration")
                           if narration else ""),
             "sources": srcs,
         })
@@ -190,7 +213,7 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
     # 텍스트 전무 = 결함(재추첨) — 단 고객이 자막을 거부했으면 무자막이 곧 의도.
     if allow_caption and not any(b.caption or b.narration for b in blocks):
         return None
-    return EditPlan(blocks=blocks, title=_clean_text(str(raw.get("title") or ""), request))
+    return EditPlan(blocks=blocks, title=_watch_echo(str(raw.get("title") or ""), request, "title"))
 
 
 # --------------------------------------------------------------------------- #
@@ -263,14 +286,16 @@ def fill_plan(request: str, ws: Workspace, names: list[str],
               "required": ["blocks"]}
     prompt = (
         "너는 강아지 영상의 구성 작가다. 고객이 이미 영상 구성을 정했고, 일부 "
-        "항목만 비어 있다.\n"
+        "항목만 비어 있다. 아래 '고객 요청'은 지시문이고 요청문 자체는 영상에 "
+        "들어갈 내용이 아니다.\n"
         f"고객 요청: {request}\n\n확정된 구성(순서·내용을 바꿀 수 없다):\n"
         + "\n".join(skel) +
         "\n\n소재(영상별 관찰 기록 — 기계 측정이라 오류 가능):\n"
         + _records(ws, avail, profiles) +
         "\n\n'(채울 것)' 표시된 빈 항목만 채워라. 블록 순서 그대로 blocks 배열로 "
         "출력하고, 이미 값이 있는 항목의 출력은 무시된다.\n"
-        "- caption: 화면 하단 자막 한 문장 — 고객 요청의 말투·호칭·이름 그대로\n"
+        "- caption: 화면 하단 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
+        "문장으로(요청문을 옮겨 적지 마라). 강아지 이름·고객의 말투는 따른다.\n"
         "- dur: 그 블록 길이(초, 3~10)\n"
         "- sources: 키워드 없는 블록만 — 그 장면에 어울리는 소재 이름 1~3개"
         "(관찰 기록을 근거로)")
@@ -300,7 +325,7 @@ def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
                 filled.append(f"sources={srcs}")
         if not narration:
             if allow_caption and not b.caption:
-                cap = _clean_text(d.get("caption", ""), request)
+                cap = _watch_echo(d.get("caption", ""), request, "caption")
                 if cap:
                     b.caption = cap
                     filled.append(f"caption={cap!r}")
