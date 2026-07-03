@@ -70,7 +70,7 @@ def test_pin_mode():
 
 def test_clean_keywords():
     from pipeline.m5_tts.interpret import _clean_keywords
-    junk = ["카페", "all", "임보견 당겨찍기:foster, 전체:full],", "target_dur: 0,`, `",
+    junk = ["카페", "all", "강아지 당겨찍기:foster, 전체:full],", "target_dur: 0,`, `",
             "산책", "아주아주아주아주 길어서 키워드일 리 없는 문자열"]
     assert _clean_keywords(junk) == ["카페", "산책"]
 
@@ -129,14 +129,14 @@ def test_expand_paths(tmp_path):
 
 
 def test_fragments_and_margin():
-    """추적 조각 합침 — 동시등장 없으면 같은 개, 격차는 진짜 경쟁자와만 (실측 형태)."""
+    """추적 조각 합침 — 동시등장 없으면 같은 강아지, 격차는 진짜 경쟁자와만 (실측 형태)."""
     from pipeline.m2_reid.photo_anchor import fragments_and_margin
-    # IMG_0066 꼴: 토리가 1·35로 조각(비동시), 11은 35와 동시등장(다른 개)
+    # IMG_0066 꼴: 토리가 1·35로 조각(비동시), 11은 35와 동시등장(다른 강아지)
     sims = {1: 0.52, 35: 0.49, 11: 0.44}
     fs = {1: set(range(0, 77)), 35: set(range(100, 474)), 11: set(range(460, 608))}
     frag, margin = fragments_and_margin(sims, fs)
     assert frag == [1, 35] and margin == pytest.approx(0.08, abs=0.001)
-    # IMG_9980 꼴: 두 개가 동시등장 + 유사도 격차 큼 → 조각 없음, 큰 margin
+    # IMG_9980 꼴: 두 강아지가 동시등장 + 유사도 격차 큼 → 조각 없음, 큰 margin
     frag, margin = fragments_and_margin({1: 0.63, 2: 0.26}, {1: set(range(200)), 2: set(range(200))})
     assert frag == [1] and margin == pytest.approx(0.37, abs=0.001)
     # 동시등장 1프레임(ID 스위치 노이즈)은 조각 허용
@@ -184,7 +184,7 @@ def test_photo_anchor_confident():
     low_margin = {"track": 1, "sim": 0.48, "margin": 0.004, "sims": {1: 0.48, 2: 0.478}}  # 비숑 실측꼴
     none = {"track": None, "sim": 0.0, "margin": 1.0, "sims": {}}
     assert confident(ok)
-    assert not confident(low_sim)      # 영상에 그 개가 없을 수도 → 카드
+    assert not confident(low_sim)      # 영상에 그 강아지가 없을 수도 → 카드
     assert not confident(low_margin)   # 유사견종 오귀속 방어 → 카드
     assert not confident(none)
 

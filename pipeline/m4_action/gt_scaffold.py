@@ -1,8 +1,8 @@
 """M4 GT 라벨링 스캐폴드 — 사람 라벨 부담 최소화.
 
 측정-우선 원칙: GT(정답)는 사람이 확정한다. 단 백지에서 시작하지 않는다.
-  1) M3 모션 곡선(임보견 박스 기준)으로 동/정 *구간 경계 후보*를 자동 생성.
-  2) 각 구간의 임보견 크롭을 0.25초 간격으로 뽑아 컨택트시트(PNG)로 렌더.
+  1) M3 모션 곡선(강아지 박스 기준)으로 동/정 *구간 경계 후보*를 자동 생성.
+  2) 각 구간의 강아지 크롭을 0.25초 간격으로 뽑아 컨택트시트(PNG)로 렌더.
   3) draft JSON 에 group 힌트(모션 기반)와 action="TODO" 를 채워 둠.
 → 사람은 시트를 보고 action 만 채우고 경계/군을 고치면 된다. group 은 최종적으로
   action 에서 파생(group_of)되며, 모션 힌트는 참고일 뿐 정답이 아니다.
@@ -26,31 +26,31 @@ from ..workspace import Workspace
 
 
 def foster_boxes_gt(name: str, foster_dog: int, ws: Workspace | None = None) -> dict[int, BBox]:
-    """임보견 GT 박스를 프레임별로 dense 보간해 ROI 궤적 생성.
+    """강아지 GT 박스를 프레임별로 dense 보간해 ROI 궤적 생성.
 
     global_dog_id 는 곧 GT track_id 다(m2 gt_derive: pred→GT track id 매핑이므로).
-    GT 는 fragmentation 이 없어 임보견이 단일 GT track == foster_dog 로 존재한다.
+    GT 는 fragmentation 이 없어 강아지가 단일 GT track == foster_dog 로 존재한다.
     """
     ws = ws or Workspace.dev()
     gt = io.read_frames(ws.gt_m1(name))
     boxes = interpolate_boxes(gt, foster_dog)
     if not boxes:
         present = sorted({d.track_id for f in gt for d in f.detections})
-        raise SystemExit(f"{name}: 임보견 GT track={foster_dog} 박스 없음. 존재 트랙={present}")
+        raise SystemExit(f"{name}: 강아지 GT track={foster_dog} 박스 없음. 존재 트랙={present}")
     return boxes
 
 
 def foster_boxes_pred(name: str, ws: Workspace | None = None,
                       foster_track_id: int | None = None) -> dict[int, BBox]:
-    """프로덕션용 — GT 없는 영상의 임보견 박스를 M1 pred 에서 도출.
+    """프로덕션용 — GT 없는 영상의 강아지 박스를 M1 pred 에서 도출.
 
-    단독 임보견(고객 영상은 보통 토리 한 마리) 가정: 프레임마다 가장 큰 dog 박스 =
-    임보견. 고양이/distractor 는 cls 로 배제. pred 는 매 프레임이라 보간 불필요.
+    단독 강아지(고객 영상은 보통 토리 한 마리) 가정: 프레임마다 가장 큰 dog 박스 =
+    강아지. 고양이/distractor 는 cls 로 배제. pred 는 매 프레임이라 보간 불필요.
     다견 잡에서 고객이 track 을 고르면(foster_track_id) 그 트랙만 남겨 정확히 좁힌다.
     """
     ws = ws or Workspace.dev()
     frames = io.read_frames(ws.preds_m1(name))
-    # 사진 앵커가 추적 조각들을 합쳐 리스트로 줄 수 있다(같은 개 = 트랙 여러 개).
+    # 사진 앵커가 추적 조각들을 합쳐 리스트로 줄 수 있다(같은 강아지 = 트랙 여러 개).
     wanted = None
     if foster_track_id is not None:
         wanted = (set(foster_track_id) if isinstance(foster_track_id, (list, tuple, set))
@@ -66,10 +66,10 @@ def foster_boxes_pred(name: str, ws: Workspace | None = None,
 
 
 def foster_boxes(name: str, ws: Workspace | None = None) -> dict[int, BBox]:
-    """임보견 ROI 통합 제공: GT 있으면 GT(측정 격리), 없으면 PRED(프로덕션).
+    """강아지 ROI 통합 제공: GT 있으면 GT(측정 격리), 없으면 PRED(프로덕션).
 
     측정용 5영상은 손라벨 GT 로 정밀하게, 고객/신규 영상은 검출 결과로 자동 처리 —
-    설계서의 '개발 채점 vs 운영 자동화' 분리를 코드로 구현한 지점. 임보견 track 은
+    설계서의 '개발 채점 vs 운영 자동화' 분리를 코드로 구현한 지점. 강아지 track 은
     ws(개발=foster_map, 잡=meta.json)에서 결정한다.
     """
     ws = ws or Workspace.dev()
@@ -105,7 +105,7 @@ def _crop(frame, b: BBox, thumb_h: int = 160):
 def render_contact_sheet(name: str, segs, boxes: dict[int, BBox], fps: float,
                          out_png: Path, thumb_h: int = 160,
                          ws: Workspace | None = None) -> None:
-    """구간별 임보견 크롭 가로 스트립을 세로로 쌓아 한 장 PNG 로."""
+    """구간별 강아지 크롭 가로 스트립을 세로로 쌓아 한 장 PNG 로."""
     ws = ws or Workspace.dev()
     cap = cv2.VideoCapture(str(ws.analysis(name)))
     frame_cache: dict[int, np.ndarray] = {}
@@ -186,7 +186,7 @@ def main(argv=None) -> int:
     p.add_argument("names", nargs="*", default=None,
                    help="영상 이름들 (기본: 테스트 5영상 전부)")
     p.add_argument("--foster-dog", type=int, default=None,
-                   help="임보견 track 강제 지정(기본: foster_map.json)")
+                   help="강아지 track 강제 지정(기본: foster_map.json)")
     p.add_argument("--thr", type=float, default=8.0, help="모션 동/정 임계(경계 후보용)")
     p.add_argument("--fps", type=float, default=30.0)
     p.add_argument("--sheet-dir", default="data/dev/m4_sheets")

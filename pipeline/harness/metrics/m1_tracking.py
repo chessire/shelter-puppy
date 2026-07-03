@@ -55,7 +55,7 @@ def _align_frames(
     사람이 0.5~1초 간격 키프레임만 라벨하므로, 라벨 안 한 프레임의 pred 박스를
     FP로 오인하면 안 된다. GT 프레임열 = 채점 대상. pred 에 해당 frame_idx 가
     없으면 빈 프레임(누락)으로 본다. GT 한 프레임이 detections=[] 면 '라벨했으나
-    개 없음'(true negative) 으로 정상 채점된다.
+    강아지 없음'(true negative) 으로 정상 채점된다.
     """
     pmap = {f.frame_idx: f for f in pred}
     out = []

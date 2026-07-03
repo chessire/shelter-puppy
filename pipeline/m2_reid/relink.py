@@ -74,12 +74,12 @@ def _pair_counts(gt_map: dict[int, int], pred_map: dict[int, int]):
 
 
 def foster_taps(gt_map, track_ids, embeddings, track_frames, tau):
-    """단독 임보견 시나리오 — 임보견 1탭 지정 후 그 조각이 자동으로 붙나.
+    """단독 강아지 시나리오 — 강아지 1탭 지정 후 그 조각이 자동으로 붙나.
 
-    각 진짜 개를 '임보견'으로 두고: 앵커 1탭 → 이후 그 개의 다른 트랙은 코사인
-    유사도≥τ & 시간 비충돌이면 자동, 아니면 카드(탭). 다른 개가 임보견으로 자동
+    각 진짜 개를 '강아지'으로 두고: 앵커 1탭 → 이후 그 개의 다른 트랙은 코사인
+    유사도≥τ & 시간 비충돌이면 자동, 아니면 카드(탭). 다른 개가 강아지으로 자동
     오인되면 false_attach(안전 위반).
-    반환: [(taps, false_attach), ...]  (개별 임보견 시나리오마다)
+    반환: [(taps, false_attach), ...]  (개별 강아지 시나리오마다)
     """
     import numpy as np
     emb = {int(t): embeddings[i] for i, t in enumerate(track_ids)}
@@ -102,8 +102,8 @@ def foster_taps(gt_map, track_ids, embeddings, track_frames, tau):
             auto = (not (tf & frames)) and sim >= tau
             if not auto:
                 taps += 1  # 카드 → 사람 탭
-            rep = rep + emb[t]; cnt += 1; frames |= tf  # 어느 쪽이든 임보견에 흡수
-        # 안전: 다른 개 트랙이 임보견으로 자동 오인되나
+            rep = rep + emb[t]; cnt += 1; frames |= tf  # 어느 쪽이든 강아지에 흡수
+        # 안전: 다른 개 트랙이 강아지으로 자동 오인되나
         repn = rep / (np.linalg.norm(rep) + 1e-8)
         fa = 0
         for t, dd in gt_map.items():
@@ -119,7 +119,7 @@ def foster_taps(gt_map, track_ids, embeddings, track_frames, tau):
 def foster_taps_multi(gt_map, track_embs, track_frames, tau):
     """멀티 레퍼런스 버전 — 트랙당 여러 샘플 임베딩, max 유사도로 매칭.
 
-    sim(트랙, 임보견) = max over (트랙 샘플 × 임보견 레퍼런스 샘플). 평균이 각도를
+    sim(트랙, 강아지) = max over (트랙 샘플 × 강아지 레퍼런스 샘플). 평균이 각도를
     뭉개는 문제를 피해 같은 개 재인식↑ / 다른 개 구분↑ 동시에 노린다.
     """
     from collections import defaultdict
@@ -138,7 +138,7 @@ def foster_taps_multi(gt_map, track_embs, track_frames, tau):
     for d, tracks in dogs.items():
         tracks = sorted(tracks, key=lambda t: min(track_frames.get(t, {10**9})))
         anchor = tracks[0]
-        refs = track_embs[anchor].copy()       # 임보견 레퍼런스 세트(성장)
+        refs = track_embs[anchor].copy()       # 강아지 레퍼런스 세트(성장)
         frames = set(track_frames.get(anchor, set()))
         taps = 1
         for t in tracks[1:]:
@@ -146,7 +146,7 @@ def foster_taps_multi(gt_map, track_embs, track_frames, tau):
             auto = (not (tf & frames)) and maxsim(track_embs[t], refs) >= tau
             if not auto:
                 taps += 1
-            refs = np.vstack([refs, track_embs[t]]); frames |= tf  # 임보견에 흡수
+            refs = np.vstack([refs, track_embs[t]]); frames |= tf  # 강아지에 흡수
         fa = 0
         for t, dd in gt_map.items():
             if dd == d or t not in track_embs:
@@ -196,7 +196,7 @@ def main(argv=None) -> int:
     p.add_argument("--temporal", action="store_true",
                    help="시간적 상호배제(동시 등장 트랙 병합 금지) 적용")
     p.add_argument("--foster", action="store_true",
-                   help="단독 임보견 시나리오(임보견 1마리만 추적, <2탭 목표)")
+                   help="단독 강아지 시나리오(강아지 1마리만 추적, <2탭 목표)")
     p.add_argument("--multi", action="store_true",
                    help="멀티 레퍼런스(트랙당 여러 샘플, max 유사도) 매칭")
     args = p.parse_args(argv)
@@ -207,8 +207,8 @@ def main(argv=None) -> int:
 
     if args.foster:
         mref = "멀티레퍼런스(max)" if args.multi else "평균"
-        print(f"M2 — 단독 임보견 시나리오 [{mref}] (임보견 1탭 후 자동, 목표 <2탭/영상)")
-        print(f"  {'τ':>5}{'평균탭/임보견':>14}{'<2탭 비율':>11}{'falseAttach':>13}")
+        print(f"M2 — 단독 강아지 시나리오 [{mref}] (강아지 1탭 후 자동, 목표 <2탭/영상)")
+        print(f"  {'τ':>5}{'평균탭/강아지':>14}{'<2탭 비율':>11}{'falseAttach':>13}")
         print("  " + "-" * 46)
         for tau in taus:
             taps_list = []; fa_total = 0
@@ -224,8 +224,8 @@ def main(argv=None) -> int:
             avg = sum(taps_list) / len(taps_list) if taps_list else 0
             under2 = sum(1 for t in taps_list if t < 2) / len(taps_list) if taps_list else 0
             print(f"  {tau:>5.2f}{avg:>14.2f}{under2:>11.0%}{fa_total:>13}")
-        print(f"  * 임보견 시나리오 {len(taps_list)}건(영상별 각 개를 임보견으로). "
-              f"falseAttach=다른 개를 임보견으로 자동 오인(0이어야 안전)")
+        print(f"  * 강아지 시나리오 {len(taps_list)}건(영상별 각 개를 강아지으로). "
+              f"falseAttach=다른 개를 강아지으로 자동 오인(0이어야 안전)")
         return 0
 
     n_vid = len(names)

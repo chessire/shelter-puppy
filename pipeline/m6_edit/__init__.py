@@ -58,7 +58,7 @@ class EditBlock:
     target_dur: Optional[float] = None
     pace: str = "fast"           # fast|calm
     transition: str = "cut"      # cut|xfade (블록 내부 클립 잇기)
-    subject: str = "full"        # foster=임보견 중심 크롭, full=전체
+    subject: str = "full"        # foster=강아지 중심 크롭, full=전체
     zoom: str = "none"           # none|gradual (정적 구간 권장)
     speed: float = 1.0           # 재생속도 배율
     caption: str = ""            # 이 블록 동안 띄울 자막(빈값=없음)

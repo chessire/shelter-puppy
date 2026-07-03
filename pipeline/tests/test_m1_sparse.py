@@ -24,7 +24,7 @@ def test_unlabeled_frames_ignored():
 
 
 def test_labeled_empty_frame_is_true_negative():
-    # 키프레임 15 는 라벨했고 개가 없음(detections=[]). pred 가 거기 박스를 내면 FP.
+    # 키프레임 15 는 라벨했고 강아지가 없음(detections=[]). pred 가 거기 박스를 내면 FP.
     gt = [_f(0, [_dog(1, 0)]), _f(15, []), _f(30, [_dog(1, 30)])]
     pred = [_f(0, [_dog(1, 0)]), _f(15, [_dog(1, 15)]), _f(30, [_dog(1, 30)])]
     m = evaluate_m1(gt, pred)

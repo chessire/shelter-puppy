@@ -5,12 +5,12 @@
 
 연산(베이스라인):
   - 컷/트림 + 트랜지션(cut|xfade)
-  - subject=foster: 임보견 박스로 크롭(주인공 당기기)
-  - zoom=gradual: 임보견 중심 점차 확대(Ken Burns)
+  - subject=foster: 강아지 박스로 크롭(주인공 당기기)
+  - zoom=gradual: 강아지 중심 점차 확대(Ken Burns)
   - speed: 슬로우/배속(최종 패스 전역 적용)
   - title: 한글 제목 번인(PIL 렌더 → ffmpeg overlay; 이 ffmpeg 빌드엔 drawtext 없음)
 
-임보견 박스는 foster_map + GT 보간(측정 격리). 제품에선 M2 re-ID pred 로 교체 가능.
+강아지 박스는 foster_map + GT 보간(측정 격리). 제품에선 M2 re-ID pred 로 교체 가능.
 """
 
 from __future__ import annotations
@@ -240,7 +240,7 @@ def _probe_dims(mp4: str) -> tuple[int, int]:
 
 
 def _foster_span(name: str, t0: float, t1: float, fps: float, ws: Workspace):
-    """클립 구간의 임보견 박스 합(union) → (cx, cy, w, h) src px. 없으면 None."""
+    """클립 구간의 강아지 박스 합(union) → (cx, cy, w, h) src px. 없으면 None."""
     boxes = _foster_boxes(name, ws)
     f0, f1 = int(t0 * fps), int(t1 * fps)
     bs = [boxes[i] for i in range(f0, f1 + 1) if i in boxes]
@@ -300,9 +300,9 @@ def _extract_native(intent: EditBlock, name: str, t0: float, t1: float,
 
 def _opencv_zoom(intent: EditBlock, name: str, t0: float, t1: float,
                  out_native: Path, fps: float, ws: Workspace) -> bool:
-    """임보견 얼굴로 *고정 영역* 매끄러운 줌인 — 원본 고해상도 위에서.
+    """강아지 얼굴로 *고정 영역* 매끄러운 줌인 — 원본 고해상도 위에서.
 
-    얼굴 추적 안 함: 시작 시점 임보견 박스로 끝 줌영역 한 번 고정, 전체→그영역
+    얼굴 추적 안 함: 시작 시점 강아지 박스로 끝 줌영역 한 번 고정, 전체→그영역
     smoothstep 보간. float 어파인+Lanczos 서브픽셀로 떨림 제거. 출력은 네이티브 크기
     (이후 _normalize_fill 이 WxH 로). 박스 없으면 False.
     """

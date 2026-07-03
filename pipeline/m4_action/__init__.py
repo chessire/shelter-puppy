@@ -1,6 +1,6 @@
 """M4 — 동작 판별.
 
-설계서 매핑: 임보견 크롭 → LLM 5지선다 + logprob → 동작군/정지군 판정 → 모션 대조.
+설계서 매핑: 강아지 크롭 → LLM 5지선다 + logprob → 동작군/정지군 판정 → 모션 대조.
 이 패키지는 (1) GT 라벨링 스캐폴드, (2) 추론 러너, (3) 군 판정·폴백을 담는다.
 
 5지선다 라벨셋과 군(group) 매핑은 여기서 동결한다 — GT·러너·메트릭이 같은
@@ -16,14 +16,14 @@ _FOSTER_MAP = Path("data/dev/gt/foster_map.json")
 
 
 def foster_track(name: str) -> int:
-    """영상의 임보견 GT track_id 를 명시적 config 에서 읽는다.
+    """영상의 강아지 GT track_id 를 명시적 config 에서 읽는다.
 
-    track 0 자동가정 금지 — 임보견은 사람이 지정한 한 마리이고, GT 라벨과 M4 러너
-    크롭이 *같은* 개를 써야 측정이 성립한다. foster_map.json 이 그 단일 소스.
+    track 0 자동가정 금지 — 강아지는 사람이 지정한 한 마리이고, GT 라벨과 M4 러너
+    크롭이 *같은* 강아지를 써야 측정이 성립한다. foster_map.json 이 그 단일 소스.
     """
     m = json.loads(_FOSTER_MAP.read_text(encoding="utf-8"))
     if name not in m:
-        raise SystemExit(f"{name}: foster_map.json 에 임보견 지정 없음. 먼저 등록 필요.")
+        raise SystemExit(f"{name}: foster_map.json 에 강아지 지정 없음. 먼저 등록 필요.")
     return int(m[name])
 
 # 사용자 확정 라벨셋 (2026-06-30, 7동작으로 확장). 로코모션 5 + 묘기(재주) 2.

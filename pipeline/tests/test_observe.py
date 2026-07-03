@@ -46,7 +46,7 @@ def test_profile_text_gloss_and_fallback(monkeypatch, tmp_path):
         "places": {"indoor": True, "categories": [["veterinarians_office", 0.9],
                                                   ["zen_garden", 0.3]]},
         "luma": {"luma": 40.9, "dark_frac": 0.58, "dark": True},
-        "caption": "실내에서 개 여러 마리가 논다.",
+        "caption": "실내에서 강아지 여러 마리가 논다.",
     }
     t = profile_text(prof)
     assert "음악 소리(0.68)" in t and "말소리(0.74)" in t
@@ -54,7 +54,7 @@ def test_profile_text_gloss_and_fallback(monkeypatch, tmp_path):
     assert "실내 확실" in t and "동물병원(0.9)" in t
     assert "zen_garden(0.3)" in t
     assert "어두움(밤/저조도)" in t
-    assert t.endswith("묘사: 실내에서 개 여러 마리가 논다.")
+    assert t.endswith("묘사: 실내에서 강아지 여러 마리가 논다.")
 
 
 def test_profile_text_no_gloss_asset(monkeypatch, tmp_path):

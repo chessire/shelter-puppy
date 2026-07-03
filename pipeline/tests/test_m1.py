@@ -58,7 +58,7 @@ def test_one_false_positive():
 
 
 def test_id_switch():
-    # pred 가 같은 개를 frame0-1 은 id10, frame2 는 id20 으로 → IDSW=1
+    # pred 가 같은 강아지를 frame0-1 은 id10, frame2 는 id20 으로 → IDSW=1
     gt = _gt_single()
     pred = [
         _frame(0, [_dog(10, 0)]),
@@ -73,7 +73,7 @@ def test_id_switch():
 
 
 def test_two_dogs_perfect():
-    # V3(개 2마리) 흉내: 두 트랙 모두 정확 추적 → 완벽
+    # V3(강아지 2마리) 흉내: 두 트랙 모두 정확 추적 → 완벽
     gt = [
         _frame(0, [_dog(1, 0), _dog(2, 50)]),
         _frame(1, [_dog(1, 1), _dog(2, 51)]),

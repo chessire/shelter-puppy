@@ -37,7 +37,7 @@ def test_keyframe_and_label_filter(tmp_path):
     assert d.track_id == 0 and d.cls == "dog"
     assert d.bbox.to_list() == [10.0, 20.0, 20.0, 40.0]
 
-    # frame30: dog outside → 빈 프레임(라벨됐으나 개 없음 = true negative).
+    # frame30: dog outside → 빈 프레임(라벨됐으나 강아지 없음 = true negative).
     assert frames[2].frame_idx == 30 and frames[2].detections == []
 
     # t = frame_idx / fps

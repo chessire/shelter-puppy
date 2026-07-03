@@ -29,7 +29,7 @@ def test_m2_perfect_no_intervention():
 
 
 def test_m2_false_merge():
-    # 두 다른 개(global 100,200)를 pred 가 한 ID(7)로 잘못 합침 → false merge.
+    # 두 다른 강아지(global 100,200)를 pred 가 한 ID(7)로 잘못 합침 → false merge.
     gt = {1: 100, 2: 200}
     pred = ReIDResult(mapping={1: 7, 2: 7})
     m = evaluate_m2(gt, pred)

@@ -161,7 +161,7 @@ def _to_plan(raw: dict, request: str, avail: list[str],
             "sources": srcs,
         })
         # 결정론 강제: 저작은 speed 를 못 만진다(배속은 "요청이 명시할 때만" 가드),
-        # 줌 블록은 임보견 중심(기존 클로즈업 귀속과 같은 구조 매핑).
+        # 줌 블록은 강아지 중심(기존 클로즈업 귀속과 같은 구조 매핑).
         b.speed = 1.0
         if b.zoom == "gradual":
             b.subject = "foster"

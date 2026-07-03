@@ -1,8 +1,8 @@
-"""M4 러너 — 임보견 크롭 → Gemma 군판정 → M3 모션 대조 → uncertain 폴백.
+"""M4 러너 — 강아지 크롭 → Gemma 군판정 → M3 모션 대조 → uncertain 폴백.
 
 설계서 레이어1 4·5단계:
-  4. 동작 판별: 768px 임보견 크롭, 0.25초 샘플 → 7지선다 + logprob
-  5. 모션 대조: 전체화면이 아닌 *임보견 박스* 모션으로 4번 결과 검증
+  4. 동작 판별: 768px 강아지 크롭, 0.25초 샘플 → 7지선다 + logprob
+  5. 모션 대조: 전체화면이 아닌 *강아지 박스* 모션으로 4번 결과 검증
 역할분담(2026-06-30 확정): **동/정 군은 M3 전담**(카메라 보상 ROI 잔차 = 피사체 모션의
 직접 측정), **gemma 는 '의미'만**(동작 라벨 + 묘기=손/제스처). gemma 는 정지 크롭이라
 모션 판정이 불안정하고 특히 어두우면 *확신하며 오답*(밤 질주를 정적묘기로 0.99 확신) —
@@ -33,7 +33,7 @@ from ..m3_motion.curve import compute_motion_curve, segment_motion
 from ..workspace import Workspace
 
 MODEL = "gemma4:26b-a4b-it-q4_K_M"
-# 구간 내 임보견 박스가 이 비율 미만으로만 검출되면(희소·튐) M3 모션·크롭을 불신 → uncertain.
+# 구간 내 강아지 박스가 이 비율 미만으로만 검출되면(희소·튐) M3 모션·크롭을 불신 → uncertain.
 # '가짜 큰 잔차'(박스가 프레임마다 튀어 ROI 내용이 바뀜) 방지 가드.
 MIN_COVERAGE = 0.25
 PROMPT_BASE = (
@@ -141,7 +141,7 @@ def run(name: str, thr: float, fps: float, conf_thr: float, max_crops: int,
     ws = ws or Workspace.dev()
     boxes = foster_boxes(name, ws)   # GT 있으면 GT, 없으면 pred(프로덕션)
     if not boxes:
-        print(f"[{name}] 임보견 박스 없음 — M1 pred 확인 필요. 건너뜀.")
+        print(f"[{name}] 강아지 박스 없음 — M1 pred 확인 필요. 건너뜀.")
         return 1
     mp4 = ws.analysis(name)
     motion = compute_motion_curve(mp4, boxes)

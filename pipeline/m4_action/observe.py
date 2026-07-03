@@ -9,7 +9,7 @@
                           에서만(비카페 Music ≤0.03). 스틸 4형식 전패 축이 오디오로
                           뚫림. 비도 통과(Rain·Ocean/Waves 물소리 0.6+, 타영상 ≤0.08).
                           실내/실외 클래스는 전부 <0.12 → 이 축은 못 가름(Places 몫).
-                          지뢰: 개 발소리→Horse/Clip-clop 오분류 — 관찰은 그대로 적고
+                          지뢰: 강아지 발소리→Horse/Clip-clop 오분류 — 관찰은 그대로 적고
                           해석은 매칭 Gemma 에 맡긴다(관찰≠해석).
   Places365(ResNet18)   — 실내 확정만 신뢰(실내 6/6 avg 0.94+, 실외 3영상은 0.45~0.64
                           전부 애매 — 지면 위주 핸드헬드라 하늘 단서가 프레임에 없음).
@@ -233,7 +233,7 @@ def is_dark(luma: float, dark_frac: float) -> bool:
 
 # --------------------------------------------------------------------------- #
 # 배경 벡터 — 피사체(검출 박스) 마스킹한 배경 부자 프레임의 DINOv2 임베딩.
-# 장면 전파의 시각 채널(2026-07-03 스파이크): 개를 안 지우면 "나무 바닥 위 흰 개"
+# 장면 전파의 시각 채널(2026-07-03 스파이크): 강아지를 안 지우면 "나무 바닥 위 흰 강아지"
 # 라는 피사체 유사도가 배경 유사도로 위장한다(다른 실내 0.78 → 마스킹 후 0.52,
 # 같은 카페는 0.71 유지 = 격차 0.19). 상단 밴드만 보기는 목표까지 망가져 기각.
 # --------------------------------------------------------------------------- #
@@ -275,7 +275,7 @@ def _bg_frames_masked(ws: Workspace, name: str, k: int = 5) -> list[np.ndarray]:
             fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
             mean = fr.reshape(-1, 3).mean(axis=0)
             h, w = fr.shape[:2]
-            for d in by_idx[i].detections:      # 개·고양이 등 검출 전부(피사체 제거)
+            for d in by_idx[i].detections:      # 강아지·고양이 등 검출 전부(피사체 제거)
                 pad_w, pad_h = d.bbox.w * 0.15, d.bbox.h * 0.15
                 x0 = max(0, int(d.bbox.x - pad_w)); y0 = max(0, int(d.bbox.y - pad_h))
                 x1 = min(w, int(d.bbox.x + d.bbox.w + pad_w))
@@ -316,7 +316,7 @@ def caption(analysis_mp4: str | Path) -> str:
         return ""
     prompt = ("한 강아지 영상에서 시간순으로 뽑은 프레임들이다. 영상의 장소·환경·"
               "상황을 한국어 1~2문장으로 객관적으로 묘사하라. 보이는 것만 적고 "
-              "추측(장소 이름 단정, 개의 감정)은 하지 마라.")
+              "추측(장소 이름 단정, 강아지의 감정)은 하지 마라.")
     r = ollama.chat(model=MODEL,
                     messages=[{"role": "user", "content": prompt, "images": jpegs}],
                     options={"temperature": 0, "num_predict": 200,

@@ -4,14 +4,14 @@
   - <track id=.. label=..> 안의 <box ... keyframe="1" outside="0">만 취한다.
     keyframe 만 쓰는 이유 = 사람이 실제로 손으로 찍은 프레임이 곧 '정답 표본'.
     (CVAT 가 보간한 사이 프레임은 사람의 판단이 아니므로 GT 에서 뺀다 → 스파스 GT)
-  - label 필터(기본 {"dog"}): 임보견만 GT 로. 고양이는 라벨 안 함 → 모델이 고양이를
-    개로 잡으면 FP 로 잡히게 한다(타종 오검출 측정).
+  - label 필터(기본 {"dog"}): 강아지만 GT 로. 고양이는 라벨 안 함 → 모델이 고양이를
+    강아지로 잡으면 FP 로 잡히게 한다(타종 오검출 측정).
 
 출력: FrameDetections JSONL (분석 mp4 좌표계, [x,y,w,h]).
   track id = CVAT track id (= M1 track_id). t = frame_idx / fps.
 
 한 프레임이 어떤 track 의 keyframe 이지만 그 track 이 outside 면, 그 프레임은
-'라벨했으나 해당 개 없음'으로 남아 빈/부분 프레임이 된다(true negative 채점).
+'라벨했으나 해당 강아지 없음'으로 남아 빈/부분 프레임이 된다(true negative 채점).
 """
 
 from __future__ import annotations

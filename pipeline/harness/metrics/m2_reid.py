@@ -1,7 +1,7 @@
 """M2 re-ID 메트릭 ★게이트 — 군집 정확도 + 자동재연결률 + 영상당 개입수.
 
 track_id 들을 global_dog_id 로 묶는 '군집' 문제로 본다. GT 는 정답 군집,
-pred 는 시스템 군집. 핵심 위험은 'false merge'(다른 두 개를 한 ID로) 이므로
+pred 는 시스템 군집. 핵심 위험은 'false merge'(다른 두 강아지를 한 ID로) 이므로
 쌍(pair) 단위 precision/recall 로 잡는다.
 
 설계서 측정 지표:

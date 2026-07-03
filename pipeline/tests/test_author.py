@@ -56,7 +56,7 @@ def test_clean_text_request_echo():
 
 def test_clean_text_emoji():
     # 실측: title 에 🐾 유출 — PIL 기본 폰트가 두부(□)로 렌더
-    assert _clean_text("🐾 임보견 '토리'를 찾아라! 🐾", "요청") == "임보견 '토리'를 찾아라!"
+    assert _clean_text("🐾 강아지 '토리'를 찾아라! 🐾", "요청") == "강아지 '토리'를 찾아라!"
     cleaned = _clean_text("토리 ❤️ 최고", "요청")
     assert "❤" not in cleaned and "토리" in cleaned and "최고" in cleaned
 
@@ -100,7 +100,7 @@ def test_author_plan_sanitize(monkeypatch, tmp_path):
     b0, b1 = plan.blocks[0], plan.blocks[1]
     assert b0.sources == ["IMG_A"]                     # 환각 IMG_Z·중복 소독
     assert b0.target_dur == 12.0 and b1.target_dur == 2.0   # dur 클램프
-    assert b0.subject == "foster"                      # 줌 블록 → 임보견 중심
+    assert b0.subject == "foster"                      # 줌 블록 → 강아지 중심
     assert all(b.speed == 1.0 for b in plan.blocks)    # 저작은 배속 금지
     assert b0.narration == "안녕"
     assert plan.title == "우리 토리"

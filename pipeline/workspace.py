@@ -157,14 +157,14 @@ class Workspace:
         return {k: set(v) for k, v in raw.items() if not k.startswith("_")}
 
     def foster_track(self, name: str) -> int | None:
-        """임보견 track id. 잡=meta.json['foster_track'], 개발=gt/foster_map.json.
+        """강아지 track id. 잡=meta.json['foster_track'], 개발=gt/foster_map.json.
 
         잡은 단독견이면 None(=foster_boxes_pred 가 최대 dog 박스로 자동 처리),
         다견이면 고객이 고른 track id 가 meta 에 저장된다. 개발은 GT track id.
         """
         meta = self.read_meta()
         # 영상별 맵(다견 잡 — 사진 앵커/카드가 채움)이 단일 값보다 우선.
-        # 값이 리스트면 추적 조각들(같은 개가 트랙 여러 개로 갈라진 것) — 그대로 전달,
+        # 값이 리스트면 추적 조각들(같은 강아지가 트랙 여러 개로 갈라진 것) — 그대로 전달,
         # foster_boxes_pred 가 집합 필터로 처리한다.
         fmap = meta.get("foster_track_map") or {}
         if fmap.get(name) is not None:

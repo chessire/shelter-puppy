@@ -1,9 +1,9 @@
 """잡 엔트리포인트 — 요청당 1개 영상 파이프라인 (상태머신).
 
-설계서 '백엔드 ↔ 파이프라인 계약'을 코드로 구현. 임보견 선택이 사람 개입
+설계서 '백엔드 ↔ 파이프라인 계약'을 코드로 구현. 강아지 선택이 사람 개입
 체크포인트라, 잡은 fire-and-forget 이 아니라 2단계 상태 머신이다:
 
-  prepare(ws)            → P0 정규화 + M1 검출 → 임보견 후보(단독견이면 자동확정)
+  prepare(ws)            → P0 정규화 + M1 검출 → 강아지 후보(단독견이면 자동확정)
   [다견이면 고객이 트랙 선택 → meta 저장]   ← Phase 3(카드)
   render(ws, request)    → M4 동작판정 + M6 편집 → out/
 
@@ -65,9 +65,9 @@ def _expand_paths(paths: list[str | Path], exts: set[str], what: str) -> list[Pa
 # --------------------------------------------------------------------------- #
 def init_job(job_id: str, inputs: list[str | Path], data_root: str | Path | None = None,
              dog_photos: list[str | Path] | None = None) -> Workspace:
-    """잡 디렉토리 생성 + 입력 영상 input/ 복사 + 임보견 사진 refs/ 복사 + meta 초기화.
+    """잡 디렉토리 생성 + 입력 영상 input/ 복사 + 강아지 사진 refs/ 복사 + meta 초기화.
 
-    dog_photos = 임보견 레퍼런스 사진(선택). 다견 감지 시 사진 앵커가 트랙을 자동
+    dog_photos = 강아지 레퍼런스 사진(선택). 다견 감지 시 사진 앵커가 트랙을 자동
     지정한다 — 사진은 잡마다 탭할 필요 없는 1회 자산(고객 프로필감).
     """
     ws = Workspace.job(job_id, data_root)
@@ -85,13 +85,13 @@ def init_job(job_id: str, inputs: list[str | Path], data_root: str | Path | None
         ref_dir.mkdir(parents=True, exist_ok=True)
         for src in _expand_paths(dog_photos, _IMG_SET, "사진"):
             if not src.exists():
-                raise SystemExit(f"임보견 사진 없음: {src}")
+                raise SystemExit(f"강아지 사진 없음: {src}")
             shutil.copy2(src, ref_dir / src.name)
             refs.append(src.name)
     ws.write_meta({"job_id": job_id, "state": "uploaded", "inputs": saved,
                    "dog_photos": refs})
     print(f"[init] {ws.root}  입력 {len(saved)}개: {saved}"
-          + (f"  임보견 사진 {len(refs)}장" if refs else ""))
+          + (f"  강아지 사진 {len(refs)}장" if refs else ""))
     return ws
 
 
@@ -108,7 +108,7 @@ def _input_names(ws: Workspace) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# 1단계 — prepare: P0 + M1 + 임보견 후보
+# 1단계 — prepare: P0 + M1 + 강아지 후보
 # --------------------------------------------------------------------------- #
 def _dog_tracks(ws: Workspace, name: str, min_frac: float) -> dict[int, int]:
     """영상의 유의미한 dog 트랙 → 등장 프레임 수. (min_frac 미만 등장은 노이즈로 배제)"""
@@ -124,7 +124,7 @@ def _dog_tracks(ws: Workspace, name: str, min_frac: float) -> dict[int, int]:
 
 def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
             min_track_frac: float = 0.1) -> dict:
-    """P0 정규화 + M1 검출 → 임보견 후보 판정. 단독견이면 자동확정.
+    """P0 정규화 + M1 검출 → 강아지 후보 판정. 단독견이면 자동확정.
 
     반환 meta(갱신본). state = prepared(단독견 자동) | needs_foster_pick(다견).
     """
@@ -151,7 +151,7 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
         s = m1_run(str(ws.analysis(name)), str(ws.preds_m1(name)), weights=weights, conf=conf)
         print(f"     frames={s['frames']} boxes={s['boxes']} tracks={s['tracks']}")
 
-    # 임보견 후보: 영상별 유의미 dog 트랙 수. 어느 영상이든 2마리+면 다견.
+    # 강아지 후보: 영상별 유의미 dog 트랙 수. 어느 영상이든 2마리+면 다견.
     per_video = {name: _dog_tracks(ws, name, min_track_frac) for name in names}
     max_dogs = max((len(t) for t in per_video.values()), default=0)
     candidates = {name: sorted(t, key=t.get, reverse=True) for name, t in per_video.items()}
@@ -163,12 +163,12 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
     from .m4_action.observe import ensure_profiles
     ensure_profiles(ws, names)
 
-    # 사람이 이미 확정한 임보견(foster_auto/foster_track)은 재판정으로 뒤집지 않는다 —
+    # 사람이 이미 확정한 강아지(foster_auto/foster_track)은 재판정으로 뒤집지 않는다 —
     # 안 그러면 다견 확정 후 재실행할 때마다 needs_foster_pick 으로 되돌아가 무한 대기.
     meta0 = ws.read_meta()
     if meta0.get("foster_auto") or meta0.get("foster_track") is not None:
         meta = ws.update_meta(state="prepared", dog_candidates=candidates)
-        print("[prepare] 임보견 기확정 — 재판정 생략 ✓")
+        print("[prepare] 강아지 기확정 — 재판정 생략 ✓")
     elif max_dogs <= 1:
         meta = ws.update_meta(state="prepared", foster_auto=True, foster_track=None,
                               dog_candidates=candidates)
@@ -226,7 +226,7 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
             meta = ws.update_meta(state="needs_foster_pick", foster_auto=False,
                                   foster_track_map=fmap, foster_uncertain=pending,
                                   dog_candidates=candidates)
-            print(f"[prepare] 다견 — 애매한 {len(pending)}영상만 임보견 선택 필요: "
+            print(f"[prepare] 다견 — 애매한 {len(pending)}영상만 강아지 선택 필요: "
                   f"{pending} (meta.foster_track_map 에 track 지정 후 재실행)")
         else:
             meta = ws.update_meta(state="prepared", foster_auto=False,
@@ -312,7 +312,7 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
     if not names:
         raise SystemExit(f"{ws.root}: prepare 가 안 끝났음(sources 없음).")
     if meta.get("state") == "needs_foster_pick":
-        raise SystemExit(f"{ws.root}: 임보견 선택 대기 중. meta.foster_track 설정 후 재시도.")
+        raise SystemExit(f"{ws.root}: 강아지 선택 대기 중. meta.foster_track 설정 후 재시도.")
 
     mode = meta.get("mode")
     if mode in ("narration", "edit"):
@@ -384,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("job_id", help="잡 식별자 (→ $DATA_ROOT/<job_id>)")
     p.add_argument("--inputs", nargs="+", help="입력 영상 경로들(주면 init_job 부터)")
     p.add_argument("--dog-photos", nargs="+",
-                   help="임보견 레퍼런스 사진(선택) — 다견 감지 시 사진 앵커로 자동 지정")
+                   help="강아지 레퍼런스 사진(선택) — 다견 감지 시 사진 앵커로 자동 지정")
     p.add_argument("--request", help="자연어 편집요청(주면 render 까지)")
     p.add_argument("--rerender", action="store_true",
                    help="저장된 요청(meta.request)으로 재렌더 — 분석·태그·장면·TTS 캐시를 "
