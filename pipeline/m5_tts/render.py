@@ -100,7 +100,7 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         stitched = tmp / "all.mp4"
         _stitch([v for v, _, _ in seq], [d for _, d, _ in seq], "cut", stitched)
         titled = tmp / "titled.mp4"
-        _overlay_text(stitched, plan.title, titled, size)
+        _overlay_text(stitched, plan.title, titled, size, pos="top")
 
         # 3) 오디오 트랙 — 실측 블록 길이 기준 산수 (경계 누적오차 없음)
         chunks, timeline, t = [], [], 0.0

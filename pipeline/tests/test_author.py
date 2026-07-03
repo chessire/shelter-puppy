@@ -231,6 +231,48 @@ def test_author_plan_caption_forbidden(monkeypatch, tmp_path):
     assert len(fake.prompts) == 1                      # 무자막이어도 재추첨 안 함
 
 
+# ── 플래시 컷 방지 (표시 하한 미달 소스 제외 → 남은 소스에 시간 몰아주기) ──
+
+def _pred(tmp_path, name, segments):
+    p = tmp_path / f"{name}_m4.json"
+    p.write_text(json.dumps({"segments": segments}), encoding="utf-8")
+    return str(p)
+
+
+def test_compile_drops_flash_cut(tmp_path):
+    from pipeline.m6_edit.run import compile_editlist
+    seg = lambda t0, t1: {"start_t": t0, "end_t": t1, "group": "static",
+                          "action": "앉기", "conf": 1.0, "uncertain": False}
+    sources = [("/x/A.mp4", _pred(tmp_path, "A", [seg(0, 0.8)])),    # 0.8초 조각
+               ("/x/B.mp4", _pred(tmp_path, "B", [seg(0, 5.0)]))]
+    intent = EditBlock(select="static", target_dur=7.0)
+    clips = compile_editlist(intent, sources, ws=Workspace(tmp_path))
+    assert [c[0] for c in clips] == ["/x/B.mp4"]       # 0.8초 플래시 컷 제외
+    assert clips[0][2] - clips[0][1] == 5.0            # 남은 소스가 시간 흡수
+
+
+def test_compile_keeps_short_when_only_source(tmp_path):
+    from pipeline.m6_edit.run import compile_editlist
+    seg = {"start_t": 0, "end_t": 0.8, "group": "static", "action": "앉기",
+           "conf": 1.0, "uncertain": False}
+    sources = [("/x/A.mp4", _pred(tmp_path, "A", [seg]))]
+    clips = compile_editlist(EditBlock(select="static", target_dur=7.0),
+                             sources, ws=Workspace(tmp_path))
+    assert len(clips) == 1                             # 유일 소스는 하한 예외
+
+
+def test_compile_short_block_unaffected(tmp_path):
+    """짧은 블록(per<MIN_SHOW, 모드A 구절 등)은 기존 동작 유지 — per 가 바닥."""
+    from pipeline.m6_edit.run import compile_editlist
+    seg = lambda t0, t1: {"start_t": t0, "end_t": t1, "group": "dynamic",
+                          "action": "걷기", "conf": 1.0, "uncertain": False}
+    sources = [("/x/A.mp4", _pred(tmp_path, "A", [seg(0, 1.0)])),
+               ("/x/B.mp4", _pred(tmp_path, "B", [seg(0, 5.0)]))]
+    clips = compile_editlist(EditBlock(select="dynamic", target_dur=2.0),
+                             sources, ws=Workspace(tmp_path))
+    assert len(clips) == 2                             # 1.0초 ≥ floor(=per 1.0) 유지
+
+
 # ── 블록 소스 필터 (저작 직접 지정 우선, 전멸 시 키워드 폴백) ──────────────
 
 def test_block_sources_direct_pick(tmp_path):

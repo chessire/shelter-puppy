@@ -33,6 +33,7 @@ from ..workspace import Workspace
 MODEL = "gemma4:26b-a4b-it-q4_K_M"
 # 묘기 블록은 gemma 가 이 신뢰도 이상으로 확신한 재주만 선택(저신뢰 묘기 오판 누수 방지).
 TRICK_CONF = 0.6
+MIN_SHOW = 1.5    # 표시 하한(초) — 이보다 짧은 컷은 플래시로 느껴진다(실측 0.8초 컷)
 _XFADE_DUR = 0.5
 _KFONT = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
 _FILL_BLUR = 28   # 블러 배경 채움 강도(방향 안 맞는 클립)
@@ -214,6 +215,17 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
     # 비줌: 소스마다 한 컷(연속). 길이 = target_dur / 소스수 (없으면 pace 기본).
     per = ((intent.target_dur / len(cand)) if intent.target_dur
            else (2.0 if intent.pace == "fast" else 4.0))
+    # 플래시 컷 방지: 소스가 여럿인데 어느 소스의 자유 구간이 표시 하한(MIN_SHOW)에
+    # 못 미치면 그 소스를 빼고 남은 소스가 시간을 나눈다 — "쓸 거면 그 장면을 길게"
+    # 선호의 하한판. 실측: static 0.8초 조각이 1초 미만 컷으로 렌더(저작 블록1).
+    # 짧은 블록(구절 등 per<MIN_SHOW)은 per 가 바닥이라 기존 동작 유지.
+    if len(cand) > 1:
+        floor = min(MIN_SHOW, per)
+        keep = [c for c in cand if c[2] - c[1] >= floor]
+        if keep and len(keep) < len(cand):
+            cand = keep
+            if intent.target_dur:
+                per = intent.target_dur / len(cand)
     # 짧은 블록 + 매칭 소스 과다 → 컷당 길이가 min_clip 미달로 전부 탈락하는 엣지
     # (모드 A 구절 길이 블록에서 실측). 소스 수를 줄여 한 컷을 길게 유지한다.
     if intent.target_dur and per < min_clip:
@@ -360,14 +372,21 @@ def _extract_clip(intent: EditBlock, mp4: str, t0: float, t1: float,
 # --------------------------------------------------------------------------- #
 # 4) 제목 번인 (PIL → overlay) / 배속
 # --------------------------------------------------------------------------- #
-def _title_png(text: str, W: int, H: int, out: Path):
+def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
+    """텍스트 PNG — pos: bottom=블록 자막 / top=전역 title.
+
+    둘을 같은 자리(하단)에 그리면 title 이 상시 깔린 위에 블록 자막이 겹친다
+    (실측: 저작이 title 을 채우면서 처음 드러난 조합 — 이전 데모는 title 이 빈 값).
+    title 은 상단 중앙, AI 배지 safe-zone(상단 10%) 아래.
+    """
     from PIL import Image, ImageDraw, ImageFont
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     font = ImageFont.truetype(_KFONT, max(28, W // 18))
     bb = d.textbbox((0, 0), text, font=font)
     tw, th = bb[2] - bb[0], bb[3] - bb[1]
-    x, y = (W - tw) // 2, H - th - max(30, H // 12)
+    x = (W - tw) // 2
+    y = (max(30, H // 8) if pos == "top" else H - th - max(30, H // 12))
     d.rectangle([x - 18, y - 14, x + tw + 18, y + th + 18], fill=(0, 0, 0, 150))
     d.text((x - bb[0], y - bb[1]), text, font=font, fill=(255, 255, 255, 255))
     img.save(out)
@@ -403,12 +422,13 @@ def _apply_speed(src: Path, speed: float, out: Path):
                     str(out)], check=True, capture_output=True)
 
 
-def _overlay_text(src: Path, text: str, out: Path, size: tuple[int, int]):
-    """src 영상 아래에 한글 자막(PIL→overlay) 박아 out 으로. 빈 텍스트면 그대로 복사."""
+def _overlay_text(src: Path, text: str, out: Path, size: tuple[int, int],
+                  pos: str = "bottom"):
+    """src 영상에 한글 텍스트(PIL→overlay) 박아 out 으로. 빈 텍스트면 그대로 복사."""
     if not text:
         src.replace(out); return
     png = out.with_name(out.stem + "_txt.png")
-    _title_png(text, size[0], size[1], png)
+    _title_png(text, size[0], size[1], png, pos=pos)
     subprocess.run(["ffmpeg", "-y", "-i", str(src), "-i", str(png),
                     "-filter_complex", "[0:v][1:v]overlay=0:0", "-c:v", "libx264",
                     "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)],
@@ -482,7 +502,7 @@ def render_plan(plan: EditPlan, sources, out_path: str, size=(768, 432), fps=30.
             raise SystemExit("선택된 클립이 없음 (어떤 블록도 조건에 맞는 구간 없음).")
         stitched_all = tmp / "all.mp4"
         _stitch([b for b, _ in block_vids], [d for _, d in block_vids], "cut", stitched_all)
-        _overlay_text(stitched_all, plan.title, Path(out_path), size)
+        _overlay_text(stitched_all, plan.title, Path(out_path), size, pos="top")
 
 
 def _probe_dur(path: str) -> float:
