@@ -98,6 +98,97 @@ def test_attribute_directives():
     assert blocks3[0].target_dur is None
 
 
+def test_scene_consensus():
+    """요청 주도 장면 추론 다수결 — 3장 중 2장 이상 일치만, 샘플 부족 시 하한 완화.
+
+    보기(order)는 요청에서 오는 파라미터일 뿐 — 함수에 어휘 결합이 없음을 증명하기
+    위해 픽스처도 추상 토큰으로 쓴다(특정 도메인 단어 금지).
+    """
+    from pipeline.m4_action.scene_auto import consensus
+    order = ["kw_a", "kw_b", "kw_c", "kw_d"]
+    assert consensus([["kw_a", "kw_c"], ["kw_a"], ["kw_c", "kw_b"]], order) == ["kw_a", "kw_c"]
+    assert consensus([["kw_d"], [], []], order) == []              # 1/3 → 기각 (보수 게이트)
+    assert consensus([["kw_b", "kw_a"]], order) == ["kw_a", "kw_b"]  # 샘플 1장 → 하한 완화
+    assert consensus([], order) == []
+
+
+def test_expand_paths(tmp_path):
+    """--inputs/--dog-photos 폴더 확장 — 파일·폴더 혼용, 확장자 필터, 이름순."""
+    from pipeline.job import _expand_paths, _IMG_SET, _VID_SET
+    d = tmp_path / "vids"; d.mkdir()
+    (d / "b.MOV").touch(); (d / "a.mp4").touch(); (d / "note.txt").touch()
+    single = tmp_path / "x.mov"; single.touch()
+    got = _expand_paths([d, single], _VID_SET, "영상")
+    assert [p.name for p in got] == ["a.mp4", "b.MOV", "x.mov"]   # 폴더 이름순 + 파일 그대로
+    p = tmp_path / "photos"; p.mkdir()
+    (p / "dog.HEIC").touch(); (p / "dog.jpg").touch(); (p / "clip.mp4").touch()
+    assert [q.name for q in _expand_paths([p], _IMG_SET, "사진")] == ["dog.HEIC", "dog.jpg"]
+    empty = tmp_path / "empty"; empty.mkdir()
+    with pytest.raises(SystemExit):        # 빈 폴더 = 명시적 에러(조용히 0개 방지)
+        _expand_paths([empty], _VID_SET, "영상")
+
+
+def test_fragments_and_margin():
+    """추적 조각 합침 — 동시등장 없으면 같은 개, 격차는 진짜 경쟁자와만 (실측 형태)."""
+    from pipeline.m2_reid.photo_anchor import fragments_and_margin
+    # IMG_0066 꼴: 토리가 1·35로 조각(비동시), 11은 35와 동시등장(다른 개)
+    sims = {1: 0.52, 35: 0.49, 11: 0.44}
+    fs = {1: set(range(0, 77)), 35: set(range(100, 474)), 11: set(range(460, 608))}
+    frag, margin = fragments_and_margin(sims, fs)
+    assert frag == [1, 35] and margin == pytest.approx(0.08, abs=0.001)
+    # IMG_9980 꼴: 두 개가 동시등장 + 유사도 격차 큼 → 조각 없음, 큰 margin
+    frag, margin = fragments_and_margin({1: 0.63, 2: 0.26}, {1: set(range(200)), 2: set(range(200))})
+    assert frag == [1] and margin == pytest.approx(0.37, abs=0.001)
+    # 동시등장 1프레임(ID 스위치 노이즈)은 조각 허용
+    frag, _ = fragments_and_margin({71: 0.41, 1: 0.37}, {71: {5, 6, 7}, 1: {7, 100, 101}})
+    assert frag == [71, 1]
+    assert fragments_and_margin({}, {}) == ([], 0.0)
+
+
+def test_donor_dedupe():
+    """앵커 전파 유사컷 배제 — 같은 영상 가중치 + 프레임 거리 가중치 (사용자 규칙)."""
+    from pipeline.m2_reid.photo_anchor import dup_score, select_diverse
+    a = {"video": "A", "frame": 100}
+    assert dup_score({"video": "B", "frame": 100}, [a]) == 0.0        # 다른 영상 = 무페널티
+    assert dup_score({"video": "A", "frame": 105}, [a]) > 0.9         # 인접 컷 ≈ 1.0
+    assert dup_score({"video": "A", "frame": 400}, [a]) == 0.5        # 같은 영상, 먼 컷
+    # 그리디: 랭킹순으로 훑되 인접 컷은 건너뛰고 다른 영상/먼 컷을 채움
+    cands = [
+        {"video": "A", "frame": 100, "margin": 1.0, "motion": 0.9},
+        {"video": "A", "frame": 110, "margin": 1.0, "motion": 0.8},   # 인접 → 제외
+        {"video": "B", "frame": 50,  "margin": 1.0, "motion": 0.7},
+        {"video": "A", "frame": 400, "margin": 0.5, "motion": 0.6},   # 같은 영상, 멀리 → 허용
+    ]
+    got = select_diverse(cands, k=3)
+    assert [(c["video"], c["frame"]) for c in got] == [("A", 100), ("B", 50), ("A", 400)]
+
+
+def test_apply_reservation():
+    """핀 소스 예약 — 남의 핀 소스는 폴백 블록이 못 쓴다(하이파이브 선점 사고)."""
+    from pipeline.m6_edit.run import _apply_reservation
+    src = [("cafe.mp4", "p1"), ("walk.mp4", "p2"), ("hi5.mp4", "p3")]
+    pins = [set(), {"walk.mp4"}, {"hi5.mp4"}]   # 블록0=폴백, 블록1=산책 핀, 블록2=하이파이브 핀
+    allowed = _apply_reservation(src, pins)
+    assert [s[0] for s in allowed[0]] == ["cafe.mp4"]                 # 폴백은 무주공산만
+    assert [s[0] for s in allowed[1]] == ["cafe.mp4", "walk.mp4"]     # 자기 핀 + 무주공산
+    assert [s[0] for s in allowed[2]] == ["cafe.mp4", "hi5.mp4"]
+    # 핀이 하나도 없으면 전 블록 전체 사용(기존 동작)
+    assert _apply_reservation(src, [set(), set()]) == [src, src]
+
+
+def test_photo_anchor_confident():
+    """사진 앵커 결정 규칙 — 절대 유사도와 격차 둘 다 넘어야 자동 확정."""
+    from pipeline.m2_reid.photo_anchor import confident
+    ok = {"track": 1, "sim": 0.60, "margin": 0.33, "sims": {1: 0.60, 2: 0.26}}   # 9980 실측꼴
+    low_sim = {"track": 1, "sim": 0.30, "margin": 0.30, "sims": {1: 0.30, 2: 0.0}}
+    low_margin = {"track": 1, "sim": 0.48, "margin": 0.004, "sims": {1: 0.48, 2: 0.478}}  # 비숑 실측꼴
+    none = {"track": None, "sim": 0.0, "margin": 1.0, "sims": {}}
+    assert confident(ok)
+    assert not confident(low_sim)      # 영상에 그 개가 없을 수도 → 카드
+    assert not confident(low_margin)   # 유사견종 오귀속 방어 → 카드
+    assert not confident(none)
+
+
 def test_editblock_narration_field():
     from pipeline.m6_edit import EditBlock
     b = EditBlock.from_dict({"select": "static", "narration": "우리 토리를 소개합니다."})

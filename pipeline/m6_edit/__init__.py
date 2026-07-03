@@ -25,7 +25,14 @@ _BLOCK_PROPS = {
     "zoom": {"type": "string", "enum": ["none", "gradual"]},
     "speed": {"type": "number"},
     "caption": {"type": "string"},      # 이 블록 동안 아래에 띄울 한글 자막. 없으면 빈 문자열.
-    "keywords": {"type": "array", "items": {"type": "string"}},  # 장면/상황 키워드(소스 필터용)
+    "keywords": {"type": "array", "items": {"type": "string"}},  # 장면 키워드(사용자 표현 그대로)
+    # ⚠️ 함의 키워드("keywords_implied" — 카페→실내 같은 유추 속성)는 기각(2026-07-03,
+    # 사용자 반례): ①틀린 함의(실내 수영장인데 실외 유추 → 오배정) ②블록 간 공유
+    # 함의(수영장·계곡 둘 다 '물')는 변별력 없음 ③실내/실외 같은 속성은 요청 단어가
+    # 아니라 영상만 아는 사실 — 속성은 픽셀에서 관찰해야(차기: 캡셔닝+텍스트 매칭).
+    # ⚠️ 장면 문구 자유텍스트 필드("scene")는 넣지 말 것(2026-07-03 실측 기각 2중):
+    # ①문구 대조 추론이 복합 문구에서 구조적 실패 ②자유 텍스트 필드가 요청 복창
+    # 반복 루프를 재유발(초소형 출력 원칙 위반). EditBlock.scene 은 향후용 예비.
     # 모드 A: 이 블록 동안 읽을 내레이션 구절(없으면 빈 문자열 = 무음 블록).
     # 내레이션이 타임라인 주인 — 있으면 블록 길이는 구절 길이가 정한다(m5_tts.render).
     "narration": {"type": "string"},
@@ -55,7 +62,8 @@ class EditBlock:
     zoom: str = "none"           # none|gradual (정적 구간 권장)
     speed: float = 1.0           # 재생속도 배율
     caption: str = ""            # 이 블록 동안 띄울 자막(빈값=없음)
-    keywords: list = None        # 장면/상황 키워드(소스 태그 필터). 비면 전체 소스.
+    keywords: list = None        # 장면 키워드(사용자 표현) — 매칭+핀. 비면 전체 소스.
+    scene: str = ""              # 장면 묘사 문구(요청 표현 그대로) — 추론 대조용(예비)
     narration: str = ""          # 모드 A: 이 블록 동안 읽을 내레이션 구절(빈값=무음 블록)
 
     @classmethod
@@ -71,6 +79,7 @@ class EditBlock:
             speed=(float(sp) if sp else 1.0),
             caption=str(d.get("caption", "") or ""),
             keywords=[str(k) for k in (d.get("keywords") or [])],
+            scene=str(d.get("scene", "") or ""),
             narration=str(d.get("narration", "") or ""),
         )
 

@@ -37,25 +37,61 @@ from .preprocess.normalize import normalize
 from .workspace import Workspace
 
 _VIDEO_EXTS = ("MOV", "mov", "mp4", "MP4", "m4v", "avi")
+_VID_SET = {e.lower() for e in _VIDEO_EXTS}
+_IMG_SET = {"jpg", "jpeg", "png", "heic", "webp"}
+
+
+def _expand_paths(paths: list[str | Path], exts: set[str], what: str) -> list[Path]:
+    """--inputs/--dog-photos 의 파일·폴더 혼용 확장 — 폴더면 안의 해당 확장자 전부(이름순).
+
+    "하나하나 입력하기 힘들다"(2026-07-03) → 폴더째 지정 지원. 하위 폴더는 안 탐(1단계만).
+    """
+    out: list[Path] = []
+    for p in paths:
+        p = Path(p).expanduser()
+        if p.is_dir():
+            found = sorted(q for q in p.iterdir()
+                           if q.is_file() and q.suffix.lower().lstrip(".") in exts)
+            if not found:
+                raise SystemExit(f"{p}: 폴더에 {what} 파일이 없음 (지원: {sorted(exts)})")
+            out += found
+        else:
+            out.append(p)
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # 잡 생성 (백엔드 역할의 최소 구현 — 디렉토리 + 업로드 저장 + meta 초기화)
 # --------------------------------------------------------------------------- #
-def init_job(job_id: str, inputs: list[str | Path], data_root: str | Path | None = None) -> Workspace:
-    """잡 디렉토리 생성 + 입력 영상을 input/ 으로 복사 + meta 초기화(state=uploaded)."""
+def init_job(job_id: str, inputs: list[str | Path], data_root: str | Path | None = None,
+             dog_photos: list[str | Path] | None = None) -> Workspace:
+    """잡 디렉토리 생성 + 입력 영상 input/ 복사 + 임보견 사진 refs/ 복사 + meta 초기화.
+
+    dog_photos = 임보견 레퍼런스 사진(선택). 다견 감지 시 사진 앵커가 트랙을 자동
+    지정한다 — 사진은 잡마다 탭할 필요 없는 1회 자산(고객 프로필감).
+    """
     ws = Workspace.job(job_id, data_root)
     ws.input_dir.mkdir(parents=True, exist_ok=True)
     saved = []
-    for src in inputs:
-        src = Path(src)
+    for src in _expand_paths(inputs, _VID_SET, "영상"):
         if not src.exists():
             raise SystemExit(f"입력 영상 없음: {src}")
         dst = ws.input_dir / src.name
         shutil.copy2(src, dst)
         saved.append(dst.stem)
-    ws.write_meta({"job_id": job_id, "state": "uploaded", "inputs": saved})
-    print(f"[init] {ws.root}  입력 {len(saved)}개: {saved}")
+    refs = []
+    if dog_photos:
+        ref_dir = ws.root / "refs"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        for src in _expand_paths(dog_photos, _IMG_SET, "사진"):
+            if not src.exists():
+                raise SystemExit(f"임보견 사진 없음: {src}")
+            shutil.copy2(src, ref_dir / src.name)
+            refs.append(src.name)
+    ws.write_meta({"job_id": job_id, "state": "uploaded", "inputs": saved,
+                   "dog_photos": refs})
+    print(f"[init] {ws.root}  입력 {len(saved)}개: {saved}"
+          + (f"  임보견 사진 {len(refs)}장" if refs else ""))
     return ws
 
 
@@ -98,6 +134,10 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
     ws.update_meta(state="validated", sources=names)
 
     for name in names:
+        # 재실행(다견 확정 후 등) 시 P0/M1 재계산 방지 — 분석은 영상당 1회(M4 재사용과 동일 결).
+        if ws.analysis(name).exists() and ws.preds_m1(name).exists():
+            print(f"[P0+M1] {name} 재사용")
+            continue
         src = ws.source_video(name)
         print(f"[P0] {name} 정규화…")
         normalize(src, ws.analysis_dir)
@@ -110,15 +150,108 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
     max_dogs = max((len(t) for t in per_video.values()), default=0)
     candidates = {name: sorted(t, key=t.get, reverse=True) for name, t in per_video.items()}
 
-    if max_dogs <= 1:
+    # 장면 태그는 여기서 만들지 않는다(2026-07-03 재설계) — 고정 어휘 선태깅은
+    # 임보자가 무슨 영상을 줄지 모르므로 구조적 사각. 요청 키워드가 곧 보기가 되는
+    # 요청 주도 추론을 render 단계(요청을 아는 시점)에서 수행한다. 사람 태그는 우선.
+
+    # 사람이 이미 확정한 임보견(foster_auto/foster_track)은 재판정으로 뒤집지 않는다 —
+    # 안 그러면 다견 확정 후 재실행할 때마다 needs_foster_pick 으로 되돌아가 무한 대기.
+    meta0 = ws.read_meta()
+    if meta0.get("foster_auto") or meta0.get("foster_track") is not None:
+        meta = ws.update_meta(state="prepared", dog_candidates=candidates)
+        print("[prepare] 임보견 기확정 — 재판정 생략 ✓")
+    elif max_dogs <= 1:
         meta = ws.update_meta(state="prepared", foster_auto=True, foster_track=None,
                               dog_candidates=candidates)
         print(f"[prepare] 단독견 자동확정 ✓  (영상별 트랙수 {{ {', '.join(f'{k}:{len(v)}' for k,v in per_video.items())} }})")
     else:
-        meta = ws.update_meta(state="needs_foster_pick", foster_auto=False,
-                              dog_candidates=candidates)
-        print(f"[prepare] 다견 감지 — 임보견 선택 필요(Phase 3 카드). 후보: {candidates}")
+        # 다견 — 2패스 앵커(2026-07-03 확정): ①사진 앵커로 확신 영상 자동 확정
+        # ②그래도 애매하면 확정 영상 크롭 top-K(앵커 전파)를 레퍼런스에 더해 재시도.
+        # 카드는 끝까지 애매한 영상만(사용자 선택은 확신 없는 것 중에서).
+        from .m2_reid.photo_anchor import (DONOR_MIN_MARGIN, confident,
+                                           donor_reference, load_ref_embedding,
+                                           match_video, ref_photos)
+        fmap = dict(meta0.get("foster_track_map") or {})
+        multi = [n for n in names if len(per_video.get(n, {})) >= 2]
+        singles = [n for n in names if len(per_video.get(n, {})) == 1]
+        pending = [n for n in multi if fmap.get(n) is None]
+        photos = ref_photos(ws)
+        margins_now: dict[str, float] = {}
+
+        def _anchor_pass(refs, tag):
+            for n in list(pending):
+                res = match_video(ws, n, list(per_video[n]), refs, embedder)
+                if confident(res):
+                    frag = res["tracks"]
+                    fmap[n] = frag if len(frag) > 1 else res["track"]
+                    margins_now[n] = res["margin"]
+                    pending.remove(n)
+                    label = f"track {frag}" if len(frag) > 1 else f"track {res['track']}"
+                    print(f"     {n}: {label} 자동확정 "
+                          f"(sim {res['sim']:.2f}, 격차 {res['margin']:.2f})")
+                else:
+                    sims = {t: round(s, 2) for t, s in res["sims"].items()}
+                    print(f"     {n}: 애매{tag} (sims {sims})")
+
+        if pending and (photos or singles or fmap):
+            from .m2_reid.embed import DinoEmbedder
+            embedder = DinoEmbedder()
+            refs = []
+            if photos:
+                refs.append(load_ref_embedding(photos, embedder))
+                print(f"[사진앵커] 레퍼런스 {len(photos)}장 ↔ 다견 {len(pending)}영상 매칭…")
+                _anchor_pass(refs, "")
+            if pending:
+                # 기증자: 단독견(구조적 안전, margin 1.0 취급) + 이번에 고격차 확정된 다견
+                donor_specs = [(n, None, 1.0) for n in singles]
+                donor_specs += [(n, fmap[n], m) for n, m in margins_now.items()
+                                if m >= DONOR_MIN_MARGIN]
+                if donor_specs:
+                    vref, picked = donor_reference(ws, donor_specs, embedder)
+                    if vref is not None:
+                        cuts = ", ".join(f"{c['video']}#{c['frame']}" for c in picked)
+                        print(f"[앵커전파] 기증 컷 {len(picked)}개({cuts}) ↔ "
+                              f"애매 {len(pending)}영상 재시도…")
+                        _anchor_pass(refs + [vref], "(전파에도)")
+        if pending:
+            meta = ws.update_meta(state="needs_foster_pick", foster_auto=False,
+                                  foster_track_map=fmap, foster_uncertain=pending,
+                                  dog_candidates=candidates)
+            print(f"[prepare] 다견 — 애매한 {len(pending)}영상만 임보견 선택 필요: "
+                  f"{pending} (meta.foster_track_map 에 track 지정 후 재실행)")
+        else:
+            meta = ws.update_meta(state="prepared", foster_auto=False,
+                                  foster_track_map=fmap, foster_uncertain=[],
+                                  dog_candidates=candidates)
+            print(f"[prepare] 다견 전원 확정 ✓ (사진앵커/기존맵): {fmap}")
     return meta
+
+
+def _infer_scenes(ws: Workspace, names: list[str], plan) -> None:
+    """요청 주도 장면 추론 — 플랜의 키워드를 보기로, 사람 태그 없는 영상만.
+
+    고정 어휘 없음(2026-07-03): 보기 = Gemma interpret 가 이 요청에서 뽑은 키워드들.
+    결과는 meta.scene_tags_auto 에 누적(키워드별 캐시 — 재렌더 시 새 키워드만 질문).
+    사람 태그(meta.scene_tags)가 있는 영상은 건드리지 않는다(사람 우선).
+    """
+    kws = [k for b in plan.blocks for k in (b.keywords or [])]
+    kws = [k for k in dict.fromkeys(kws) if k]
+    meta = ws.read_meta()
+    human = meta.get("scene_tags") or {}
+    targets = [n for n in names if not human.get(n)]
+    asked = set(meta.get("scene_keywords_asked") or [])
+    new_kws = [k for k in kws if k not in asked]
+    if not (new_kws and targets):
+        return
+    from .m4_action.scene_auto import infer_scene_tags
+    print(f"[장면추론] 요청 키워드 {new_kws} ↔ 영상 {len(targets)}개…")
+    inferred = infer_scene_tags(ws, targets, new_kws)
+    auto = meta.get("scene_tags_auto") or {}
+    for n, tags in inferred.items():
+        auto[n] = sorted(set(auto.get(n, [])) | set(tags))
+        print(f"     {n}: {auto[n]}")
+    ws.update_meta(scene_tags_auto=auto,
+                   scene_keywords_asked=sorted(asked | set(new_kws)))
 
 
 # --------------------------------------------------------------------------- #
@@ -171,11 +304,13 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
         plan = interpret_narration(request)
         n_narr = sum(1 for b in plan.blocks if b.narration)
         print(f"     블록 {len(plan.blocks)}개 (내레이션 {n_narr}구절, 보이스 {voice})")
+        _infer_scenes(ws, names, plan)
         render_narrated(plan, sources, str(out_path), size, fps, ws=ws, voice=voice)
     else:
         print("[M6] 편집 인텐트 해석…")
         plan = interpret_plan(request)
         print(f"     title={plan.title!r}  블록 {len(plan.blocks)}개")
+        _infer_scenes(ws, names, plan)
         raw = out_path.with_name("_raw_" + out_name)
         render_plan(plan, sources, str(raw), size, fps, ws=ws)
         apply_badge(raw, out_path, tts=False, size=size)   # 모드 B 도 "AI 편집" 배지
@@ -192,6 +327,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="job", description="요청당 1개 잡 실행")
     p.add_argument("job_id", help="잡 식별자 (→ $DATA_ROOT/<job_id>)")
     p.add_argument("--inputs", nargs="+", help="입력 영상 경로들(주면 init_job 부터)")
+    p.add_argument("--dog-photos", nargs="+",
+                   help="임보견 레퍼런스 사진(선택) — 다견 감지 시 사진 앵커로 자동 지정")
     p.add_argument("--request", help="자연어 편집요청(주면 render 까지)")
     p.add_argument("--prepare-only", action="store_true", help="prepare 까지만")
     p.add_argument("--data-root", default=None, help="잡 저장 루트(기본 $DATA_ROOT 또는 ./jobs)")
@@ -203,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     if args.inputs:
-        ws = init_job(args.job_id, args.inputs, args.data_root)
+        ws = init_job(args.job_id, args.inputs, args.data_root, dog_photos=args.dog_photos)
     else:
         ws = Workspace.job(args.job_id, args.data_root)
         if not ws.meta_path.exists():

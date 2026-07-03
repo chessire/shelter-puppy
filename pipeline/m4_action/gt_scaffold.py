@@ -50,11 +50,16 @@ def foster_boxes_pred(name: str, ws: Workspace | None = None,
     """
     ws = ws or Workspace.dev()
     frames = io.read_frames(ws.preds_m1(name))
+    # 사진 앵커가 추적 조각들을 합쳐 리스트로 줄 수 있다(같은 개 = 트랙 여러 개).
+    wanted = None
+    if foster_track_id is not None:
+        wanted = (set(foster_track_id) if isinstance(foster_track_id, (list, tuple, set))
+                  else {foster_track_id})
     boxes: dict[int, BBox] = {}
     for f in frames:
         dogs = [d for d in f.detections if d.cls == "dog"]
-        if foster_track_id is not None:
-            dogs = [d for d in dogs if d.track_id == foster_track_id]
+        if wanted is not None:
+            dogs = [d for d in dogs if d.track_id in wanted]
         if dogs:
             boxes[f.frame_idx] = max(dogs, key=lambda d: d.bbox.area).bbox
     return boxes

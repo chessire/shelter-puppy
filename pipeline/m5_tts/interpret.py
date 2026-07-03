@@ -132,6 +132,7 @@ def _match_scene(sentence: str, request: str) -> EditBlock:
         "- target_dur: 편집 지시가 *이 문장 장면*의 초를 명시한 경우만. 아니면 0.\n"
         "- zoom: 클로즈업/확대/얼굴을 보여줘 지시면 gradual, 아니면 none. "
         "pace: 빠른컷=fast, 잔잔=calm.\n"
+        "- speed: 지시가 슬로우/배속을 *명시*한 경우만(슬로우=0.5, 빠르게=2), 아니면 1.\n"
         "- subject: 임보견 당겨찍기·얼굴 중심=foster, 전체=full.\n"
         "- caption: 지시가 이 문장을 '텍스트로/자막으로 띄워라' 하면 그 문구"
         "(대개 내레이션 문장 그대로), 아니면 빈 문자열.\n"

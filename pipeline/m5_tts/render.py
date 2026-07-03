@@ -29,7 +29,8 @@ from .engine import QwenSubprocessEngine
 from .interpret import decide_mode, interpret_narration
 from ..m6_edit import EditPlan
 from ..m6_edit.badge import apply_badge
-from ..m6_edit.run import _apply_speed, _overlay_text, _probe_dur, _stitch, render_block
+from ..m6_edit.run import (_apply_speed, _overlay_text, _probe_dur, _stitch,
+                           allowed_sources_per_block, render_block)
 from ..workspace import Workspace
 
 _MIN_TAIL = 0.15   # 구절 끝과 컷 사이 최소 숨(초) — 이보다 짧으면 영상을 늘린다
@@ -66,6 +67,7 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         data, sr = _read_wav(Path(row["wav"]))
         return len(data) / sr
 
+    allowed = allowed_sources_per_block(plan, sources, ws)   # 핀 소스 예약(선점 방지)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         used: set = set()
@@ -75,7 +77,7 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
             if row is not None:
                 need = _phrase_sec(row) + DEFAULT_PAUSE
                 block.target_dur = max(block.target_dur or 0.0, need)
-            vid, clips = render_block(block, sources, tmp, idx, size, fps,
+            vid, clips = render_block(block, allowed[idx], tmp, idx, size, fps,
                                       exclude=used, ws=ws)
             if vid is None:                    # 조건 맞는 클립 없음 → 블록·구절 함께 드롭
                 print(f"  [경고] 블록{idx} 클립 없음 → 구절과 함께 제외: "

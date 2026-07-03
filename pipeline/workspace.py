@@ -144,10 +144,13 @@ class Workspace:
 
     # --- per-job vs 글로벌 메타 cascade ---------------------------------- #
     def scene_tags(self) -> dict[str, set]:
-        """영상별 장면 태그맵. 잡=meta.json['scene_tags'], 개발=videos/scene_tags.json."""
+        """영상별 장면 태그맵. 잡 = 사람(scene_tags) > 요청주도 추론(scene_tags_auto),
+        영상 단위로 사람 태그가 있으면 그 영상은 사람 것만. 개발 = videos/scene_tags.json."""
         meta = self.read_meta()
-        if "scene_tags" in meta:
-            raw = meta["scene_tags"]
+        human = meta.get("scene_tags") or {}
+        auto = meta.get("scene_tags_auto") or {}
+        if human or auto:
+            raw = {**auto, **human}     # 같은 영상 키는 사람이 덮는다
         else:
             p = self.videos_dir / "scene_tags.json"
             raw = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
@@ -160,6 +163,13 @@ class Workspace:
         다견이면 고객이 고른 track id 가 meta 에 저장된다. 개발은 GT track id.
         """
         meta = self.read_meta()
+        # 영상별 맵(다견 잡 — 사진 앵커/카드가 채움)이 단일 값보다 우선.
+        # 값이 리스트면 추적 조각들(같은 개가 트랙 여러 개로 갈라진 것) — 그대로 전달,
+        # foster_boxes_pred 가 집합 필터로 처리한다.
+        fmap = meta.get("foster_track_map") or {}
+        if fmap.get(name) is not None:
+            v = fmap[name]
+            return [int(t) for t in v] if isinstance(v, list) else int(v)
         if meta.get("foster_track") is not None:
             return int(meta["foster_track"])
         p = self.gt_dir / "foster_map.json"

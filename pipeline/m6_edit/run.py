@@ -69,7 +69,7 @@ def interpret_plan(request: str) -> EditPlan:
         "- transition: 컷=cut, 부드러운전환/디졸브=xfade\n"
         "- subject: 임보견을 화면 주인공으로 당겨라=foster, 전체화면=full\n"
         "- zoom: 점점 확대/클로즈업=gradual(정적 구간에만), 아니면 none\n"
-        "- speed: 슬로우모션=0.5, 보통=1, 빠르게=2\n"
+        "- speed: 요청이 슬로우/배속을 *명시*한 경우만(슬로우=0.5, 빠르게=2), 아니면 1\n"
         "- caption: 그 블록 동안 화면 아래 띄울 한글 자막. 없으면 빈 문자열.\n"
         "  ('~를 텍스트로 띄워줘/자막' 같은 말은 그 블록 caption 으로.)\n"
         "- keywords: 그 블록이 원하는 *장면/장소/상황* 키워드 배열. 예: 애견카페→[\"카페\"], "
@@ -108,20 +108,34 @@ def _scene_tags(ws: Workspace) -> dict:
 
 
 def _scene_filter(sources: list[tuple[str, str]], keywords: list,
-                  ws: Workspace) -> list[tuple[str, str]]:
-    """블록 keywords 와 태그가 맞는 소스만 남김. 매칭 없으면 전체 유지(빈 결과 방지).
+                  ws: Workspace) -> tuple[list[tuple[str, str]], set]:
+    """블록 장면 필터. 반환 (소스들, 핀된 영상 mp4 경로 집합).
 
-    부분 일치 허용: '애견카페'⊃'카페' 처럼 한쪽이 다른쪽을 포함하면 매칭.
+    - 키워드별 폴백 합집합: 일부 키워드만 매칭돼도 미매칭 키워드의 영상을 부당
+      배제하지 않는다(산책·비·밤 중 '밤'만 인식 → 산책·비 탈락 방지). 전 키워드가
+      매칭될 때만 매칭 합집합으로 좁힌다.
+    - 핀(uncertain 면제·예약)은 *키워드에 실제 매칭된 소스*에만 — 폴백 소스까지
+      핀이 번지면 나쁜 footage(uncertain)가 유입된다(고양이 사고 실측).
+    - 부분 일치: '애견카페'⊃'카페' 허용.
+    ⚠️ 함의 키워드(카페→실내 유추) 방식은 기각 — 틀린 함의가 오배정을 만들고
+      실내/실외는 요청이 아니라 영상만 아는 사실(차기: 캡셔닝+텍스트 매칭).
     """
-    if not keywords:
-        return sources
+    kws = [k for k in (keywords or []) if k]
+    if not kws:
+        return sources, set()
     tags = _scene_tags(ws)
 
-    def hit(src_tags: set) -> bool:
-        return any(t in kw or kw in t for kw in keywords for t in src_tags)
+    def matched(kw: str) -> set:
+        return {m for (m, _) in sources
+                if any(t in kw or kw in t for t in tags.get(Path(m).stem, set()))}
 
-    matched = [(m, p) for (m, p) in sources if hit(tags.get(Path(m).stem, set()))]
-    return matched or sources
+    per_kw = {kw: matched(kw) for kw in kws}
+    pinned = set().union(*per_kw.values()) if per_kw else set()
+    if not pinned:
+        return sources, set()           # 전 키워드 미매칭 → 전체 폴백, 핀 없음
+    if all(per_kw.values()):            # 전 키워드 매칭 → 매칭 합집합으로 좁힘
+        return [(m, p) for (m, p) in sources if m in pinned], pinned
+    return sources, pinned              # 부분 매칭 → 배제 없이 전체, 핀은 매칭 소스만
 
 
 def _free_intervals(mp4: str, s0: float, s1: float, exclude: set) -> list[tuple[float, float]]:
@@ -152,8 +166,8 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
     exclude = exclude or set()
     # 사용자가 키워드로 장면을 콕 집었으면(밤·카페 등) 그 소스는 M4 uncertain 이어도 쓴다.
     # (핀 우선 > M4 필터 — 검출 희소한 밤 footage 도 요청했으면 포함.)
-    pinned = bool(intent.keywords)
-    sources = _scene_filter(sources, intent.keywords, ws)   # 장면 키워드로 소스 거르기
+    # 핀은 소스 단위 — 키워드에 실제 매칭된 영상만 uncertain 면제.
+    sources, pinned_mp4s = _scene_filter(sources, intent.keywords, ws)
 
     # 소스별 가장 긴 자유 매칭 구간 하나
     cand: list[tuple[str, float, float]] = []
@@ -166,7 +180,7 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
             else:
                 if intent.select != "all" and s.group != intent.select:
                     continue
-                if s.uncertain and not pinned:   # 동/정 블록은 군 모호 제외(단 키워드 핀은 통과)
+                if s.uncertain and mp4 not in pinned_mp4s:  # 군 모호 제외(핀된 소스만 면제)
                     continue
             free += _free_intervals(mp4, s.start_t, s.end_t, exclude)
         if free:
@@ -413,16 +427,37 @@ def render_block(block: EditBlock, sources, tmp: Path, idx: int,
     return vid, clips
 
 
+def _apply_reservation(sources, pins: list[set]) -> list[list]:
+    """핀 소스 예약 — 블록별 허용 소스 목록 (순수 로직, 테스트용 분리).
+
+    어느 블록의 키워드에 매칭(핀)된 영상은 그 블록(들) 전용이다. 실측 사고
+    (2026-07-03): 카페 블록이 폴백 혼입으로 하이파이브 영상의 재주 구간을 먼저
+    소모 → 하이파이브 블록엔 직전 0.7초만 남아 '닿기 전에 끝나는' 엔딩.
+    """
+    owned = set().union(*pins) if pins else set()
+    return [[s for s in sources if s[0] not in (owned - mine)] for mine in pins]
+
+
+def allowed_sources_per_block(plan: EditPlan, sources, ws: Workspace) -> list[list]:
+    """블록별 핀 계산 → 예약 적용. 렌더 전 1회 선계산(모드 A/B 공용).
+
+    """
+    pins = [_scene_filter(sources, b.keywords, ws)[1] for b in plan.blocks]
+    return _apply_reservation(sources, pins)
+
+
 def render_plan(plan: EditPlan, sources, out_path: str, size=(768, 432), fps=30.0,
                 ws: Workspace | None = None):
-    """블록들을 순서대로 렌더(클립 중복 방지) → 이어붙이기 → 전역 title(있으면)."""
+    """블록들을 순서대로 렌더(클립 중복 방지·핀 예약) → 이어붙이기 → 전역 title."""
     ws = ws or Workspace.dev()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    allowed = allowed_sources_per_block(plan, sources, ws)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         block_vids, used = [], set()
         for idx, block in enumerate(plan.blocks):
-            bv, clips = render_block(block, sources, tmp, idx, size, fps, exclude=used, ws=ws)
+            bv, clips = render_block(block, allowed[idx], tmp, idx, size, fps,
+                                     exclude=used, ws=ws)
             if bv is not None:
                 block_vids.append((bv, _probe_dur(str(bv))))
                 used.update(clips)          # 다음 블록이 같은 클립 안 쓰게
