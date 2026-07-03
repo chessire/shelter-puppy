@@ -59,41 +59,11 @@ DARK_FRAC = 0.5
 
 # 라벨 한국어 gloss — *순수 번역*(함의·해석 아님). 영어 기계 라벨(Music 0.68,
 # veterinarians_office …)은 한국어 텍스트 판정에서 증거로 안 읽힌다(실측: gloss 전
-# 카페 0/2 → gloss 후 1/2). 표에 없는 라벨은 원문 그대로(안전한 폴백).
-AUDIO_KO = {
-    "Speech": "사람 말소리", "Music": "음악", "Cat": "고양이 소리", "Meow": "야옹 소리",
-    "Dog": "개 소리", "Bark": "짖는 소리", "Bow-wow": "멍멍 소리",
-    "Rain": "빗소리", "Rain on surface": "표면에 떨어지는 빗소리",
-    "Ocean": "물 흐르는/파도 소리", "Waves, surf": "물결 소리", "Stream": "물 흐르는 소리",
-    "Wind": "바람 소리", "Wind noise (microphone)": "바람 소리(마이크)",
-    "Run": "달리는 소리", "Walk, footsteps": "발걸음 소리",
-    "Typing": "타자 소리", "Computer keyboard": "키보드 소리", "Television": "TV 소리",
-    "Inside, small room": "실내(좁은 방) 울림",
-    "Inside, large room or hall": "실내(홀) 울림",
-    "Outside, rural or natural": "실외(자연) 소리",
-    "Outside, urban or manmade": "실외(도심) 소리",
-    "Vehicle": "차량 소리", "Car": "자동차 소리", "Animal": "동물 소리",
-    "Domestic animals, pets": "반려동물 소리",
-    "Livestock, farm animals, working animals": "가축류 소리",
-    "Horse": "말발굽 같은 소리", "Clip-clop": "따각따각 발소리",
-    "Tambourine": "탬버린 소리", "Jingle bell": "방울 소리",
-    "Squawk": "새된 울음", "Caterwaul": "고양이 울음",
-    "Child speech, kid speaking": "아이 말소리",
-    "Male speech, man speaking": "남자 말소리",
-    "Female speech, woman speaking": "여자 말소리",
-    "Bird": "새 소리", "Silence": "정적", "Crowd": "군중 소리",
-    "Chatter": "웅성거림", "Laughter": "웃음소리", "Water": "물소리",
-}
-PLACES_KO = {
-    "veterinarians_office": "동물병원/동물시설", "pet_shop": "펫샵", "kennel/outdoor": "견사(실외)",
-    "closet": "옷장/실내 수납", "corridor": "복도", "artists_loft": "작업실 로프트",
-    "recreation_room": "오락실/거실", "martial_arts_gym": "체육관", "art_gallery": "갤러리",
-    "playroom": "놀이방", "reception": "리셉션", "bathroom": "욕실",
-    "living_room": "거실", "home_office": "홈오피스", "bedroom": "침실",
-    "yard": "마당", "park": "공원", "field_road": "들길", "forest_path": "숲길",
-    "swimming_pool/indoor": "실내 수영장", "swimming_pool/outdoor": "실외 수영장",
-    "creek": "개울/계곡", "river": "강", "beach": "해변",
-}
+# 카페 0/2 → gloss 후 1/2). 출처는 data/models/label_gloss_ko.json **단일 자산**
+# (gloss_gen.py 가 전체 라벨 공간 AudioSet 527 + Places365 365 를 1회 번역) —
+# 코드 상수 gloss 는 2026-07-03 사용자 지시("상수 문자열 빼기")로 제거했다. 부분
+# 손검수 표는 표 밖 라벨을 안 보이는 증거로 만드는 고정 상수 함정이었고, 이중
+# 출처(코드+자산) 유지비만 남긴다. 자산이 없으면 라벨 원문 폴백(안전한 저하).
 
 
 # --------------------------------------------------------------------------- #
@@ -128,8 +98,8 @@ def _ast():
     return _ast_cache[0]
 
 
-def audio_tags(src_video: str | Path) -> list[list]:
-    """원본 영상 오디오 → [[클래스, prob], ...] (max 집계, 임계 이상 top-N)."""
+def _audio_probs(src_video: str | Path):
+    """원본 영상 오디오 → AudioSet 527 확률 벡터(윈도별 max 집계). 실패 시 None."""
     import soundfile as sf
     import torch
     with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
@@ -138,10 +108,10 @@ def audio_tags(src_video: str | Path) -> list[list]:
              "-vn", "-ac", "1", "-ar", str(_AUDIO_SR), tmp.name],
             capture_output=True, text=True)
         if r.returncode != 0:
-            return []                        # 오디오 트랙 없음 등 — 관찰 없음
+            return None                      # 오디오 트랙 없음 등 — 관찰 없음
         wav, sr = sf.read(tmp.name, dtype="float32")
     if len(wav) < _AUDIO_SR // 2:            # 0.5초 미만이면 신호가 못 됨
-        return []
+        return None
     fe, model = _ast()
     starts = [0] if len(wav) <= _AUDIO_WIN else \
         list(range(0, len(wav) - _AUDIO_WIN + 1, _AUDIO_HOP)) + \
@@ -152,10 +122,23 @@ def audio_tags(src_video: str | Path) -> list[list]:
         with torch.no_grad():
             p = torch.sigmoid(model(**inputs).logits[0]).numpy()
         probs = p if probs is None else np.maximum(probs, p)
+    return probs
+
+
+def _audio_top(probs) -> list[list]:
+    """확률 벡터 → [[클래스, prob], ...] (임계 이상 top-N, 프로필 표시용)."""
+    if probs is None:
+        return []
+    _, model = _ast()
     id2label = model.config.id2label
     top = np.argsort(-probs)[:AUDIO_TOP_N]
     return [[id2label[int(i)], round(float(probs[i]), 3)]
             for i in top if probs[i] >= AUDIO_MIN_PROB]
+
+
+def audio_tags(src_video: str | Path) -> list[list]:
+    """원본 영상 오디오 → [[클래스, prob], ...] (max 집계, 임계 이상 top-N)."""
+    return _audio_top(_audio_probs(src_video))
 
 
 # --------------------------------------------------------------------------- #
@@ -249,6 +232,73 @@ def is_dark(luma: float, dark_frac: float) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# 배경 벡터 — 피사체(검출 박스) 마스킹한 배경 부자 프레임의 DINOv2 임베딩.
+# 장면 전파의 시각 채널(2026-07-03 스파이크): 개를 안 지우면 "나무 바닥 위 흰 개"
+# 라는 피사체 유사도가 배경 유사도로 위장한다(다른 실내 0.78 → 마스킹 후 0.52,
+# 같은 카페는 0.71 유지 = 격차 0.19). 상단 밴드만 보기는 목표까지 망가져 기각.
+# --------------------------------------------------------------------------- #
+_dino_cache: list = []
+
+
+def _dino():
+    if not _dino_cache:
+        from ..m2_reid.embed import DinoEmbedder
+        _dino_cache.append(DinoEmbedder())
+    return _dino_cache[0]
+
+
+def _bg_frames_masked(ws: Workspace, name: str, k: int = 5) -> list[np.ndarray]:
+    """시간 구간(bin)별 검출 커버리지 최소 프레임 → 검출 박스를 평균색으로 마스킹."""
+    from ..harness import io as hio
+    p = ws.preds_m1(name)
+    if not p.exists():
+        return []
+    frames = hio.read_frames(str(p))
+    by_idx = {f.frame_idx: f for f in frames}
+    cap = cv2.VideoCapture(str(ws.analysis(name)))
+    W = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    H = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    area = max(W * H, 1.0)
+    cov = {f.frame_idx: min(sum(d.bbox.w * d.bbox.h for d in f.detections) / area, 1.0)
+           for f in frames}
+    out = []
+    idxs = sorted(cov)
+    if idxs:
+        for b in np.array_split(idxs, k):
+            if not len(b):
+                continue
+            i = min(b, key=lambda j: cov[j])
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
+            ok, fr = cap.read()
+            if not ok:
+                continue
+            fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            mean = fr.reshape(-1, 3).mean(axis=0)
+            h, w = fr.shape[:2]
+            for d in by_idx[i].detections:      # 개·고양이 등 검출 전부(피사체 제거)
+                pad_w, pad_h = d.bbox.w * 0.15, d.bbox.h * 0.15
+                x0 = max(0, int(d.bbox.x - pad_w)); y0 = max(0, int(d.bbox.y - pad_h))
+                x1 = min(w, int(d.bbox.x + d.bbox.w + pad_w))
+                y1 = min(h, int(d.bbox.y + d.bbox.h + pad_h))
+                fr[y0:y1, x0:x1] = mean
+            out.append(fr)
+    cap.release()
+    return out
+
+
+def scene_vec(ws: Workspace, name: str) -> list[float]:
+    """마스킹 배경 프레임들의 DINOv2 평균 단위벡터(384). 계산 불가면 []."""
+    frs = _bg_frames_masked(ws, name)
+    if not frs:
+        return []
+    e = _dino().embed(frs)
+    e = e / np.linalg.norm(e, axis=1, keepdims=True)
+    v = e.mean(axis=0)
+    v = v / np.linalg.norm(v)
+    return [round(float(x), 4) for x in v]
+
+
+# --------------------------------------------------------------------------- #
 # 캡션 — Gemma vision 자유 묘사(열린 어휘). 프레임 3장 한 호출.
 # --------------------------------------------------------------------------- #
 _CAPTION_SCHEMA = {"type": "object", "properties": {"caption": {"type": "string"}},
@@ -286,10 +336,18 @@ def build_profile(ws: Workspace, name: str) -> dict:
     prof: dict = {}
     src = ws.source_video(name)
     try:
-        prof["audio"] = audio_tags(src) if src else []
+        probs = _audio_probs(src) if src else None
+        prof["audio"] = _audio_top(probs)
+        # 전파용 전체 벡터(527) — 상위 태그만 저장하면 코사인이 측정과 어긋난다
+        prof["audio_vec"] = [round(float(p), 3) for p in probs] if probs is not None else []
     except Exception as e:                    # noqa: BLE001 — 센서가 prepare 를 못 죽인다
         print(f"     [관찰] {name} 오디오 실패: {e}")
-        prof["audio"] = []
+        prof["audio"], prof["audio_vec"] = [], []
+    try:
+        prof["scene_vec"] = scene_vec(ws, name)
+    except Exception as e:                    # noqa: BLE001
+        print(f"     [관찰] {name} 배경벡터 실패: {e}")
+        prof["scene_vec"] = []
     try:
         prof["places"] = places_scene(ws.analysis(name))
     except Exception as e:                    # noqa: BLE001
@@ -309,25 +367,60 @@ def build_profile(ws: Workspace, name: str) -> dict:
 
 
 def ensure_profiles(ws: Workspace, names: list[str]) -> dict[str, dict]:
-    """meta.scene_profile 캐시 — 없는 영상만 빌드(요청 무관 재사용 자산)."""
+    """meta.scene_profile 캐시 — 없는 영상만 빌드(요청 무관 재사용 자산).
+
+    구버전 캐시(전파 벡터 없는 프로필)는 빠진 벡터만 채워 넣는다(마이그레이션).
+    """
     meta = ws.read_meta()
     profiles = dict(meta.get("scene_profile") or {})
     todo = [n for n in names if n not in profiles]
+    dirty = bool(todo)
     for name in todo:
         print(f"[관찰] {name} 프로필(오디오·장면·휘도·캡션)…")
         profiles[name] = build_profile(ws, name)
         print(f"     {profile_text(profiles[name])}")
-    if todo:
+    for name in names:
+        prof = profiles.get(name)
+        if prof is None or name in todo:
+            continue
+        if "audio_vec" not in prof:
+            src = ws.source_video(name)
+            probs = _audio_probs(src) if src else None
+            prof["audio_vec"] = [round(float(p), 3) for p in probs] if probs is not None else []
+            dirty = True
+        if "scene_vec" not in prof:
+            prof["scene_vec"] = scene_vec(ws, name)
+            dirty = True
+    if dirty:
         ws.update_meta(scene_profile=profiles)
     return {n: profiles[n] for n in names if n in profiles}
 
 
+_gloss_tables: dict = {}
+
+
+def _gloss(kind: str) -> dict[str, str]:
+    """'audio'|'places' → 전체 gloss 표(생성 자산 단일 출처, 없으면 빈 표=원문 폴백)."""
+    if not _gloss_tables:
+        p = MODELS_DIR / "label_gloss_ko.json"
+        gen = {}
+        if p.exists():
+            try:
+                gen = json.loads(p.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                gen = {}
+        _gloss_tables["audio"] = gen.get("audio", {})
+        _gloss_tables["places"] = gen.get("places", {})
+    return _gloss_tables[kind]
+
+
 def profile_text(prof: dict, extra: str | None = None) -> str:
     """프로필 → 매칭 프롬프트용 한 줄 관찰 기록. 라벨은 한국어 gloss(순수 번역)."""
+    audio_ko, places_ko = _gloss("audio"), _gloss("places")
     parts = []
     audio = prof.get("audio") or []
     if audio:
-        parts.append("소리: " + ", ".join(f"{AUDIO_KO.get(c, c)}({p})" for c, p in audio))
+        parts.append("소리: " + ", ".join(f"{audio_ko.get(c, c)}({p})" for c, p in audio))
     else:
         parts.append("소리: (신호 없음)")
     places = prof.get("places") or {}
@@ -336,7 +429,7 @@ def profile_text(prof: dict, extra: str | None = None) -> str:
     if places.get("indoor"):
         seg.append("실내 확실")
     if cats:
-        seg.append(", ".join(f"{PLACES_KO.get(c, c)}({p})" for c, p in cats))
+        seg.append(", ".join(f"{places_ko.get(c, c)}({p})" for c, p in cats))
     if seg:
         parts.append("장면분류: " + " · ".join(seg))
     luma = prof.get("luma") or {}
@@ -376,11 +469,20 @@ def match_keywords(profiles: dict[str, dict], keywords: list[str],
                    extras: dict[str, str] | None = None) -> dict[str, list[str]]:
     """{키워드: [부합 영상들]} — Gemma 텍스트 판정, 키워드당 1호출.
 
-    지시 레시피(골든 9영상 채점으로 확정, 2026-07-03):
-      '뒷받침하면 포함, 모순·무관이면 제외' (완화) — '확실한 것만'(strict)은 빈 배열
-      어트랙터로 카페·놀이·하이파이브 전멸(2/6), 완화+gloss+정성모션 = 4/6.
-      think=True 는 기각(추론 배회로 가짜 생성·비결정성), 예/아니오 분할도 기각
-      (가짜 유출 — 융합 vision 포함 재확인). extras = 영상별 추가 관찰(모션 등).
+    레시피(골든 9영상 × 3회 안정 채점으로 확정, 2026-07-03): **완화 매칭 → 프루닝**.
+      1) 완화 매칭 '뒷받침하면 포함, 모순·무관이면 제외' — 재현 확보.
+         strict('확실한 것만')는 빈 배열 어트랙터로 카페·놀이·하이파이브 전멸(2/6).
+      2) 프루닝 패스(검증 비대칭): 후보 중 '명백히 반대'인 것만 골라 *빼라*.
+         출력⊆입력이라 가짜 추가가 구조적으로 불가능하고, 빈 배열 어트랙터가
+         안전 방향(안 뺌)으로 작동. 완화 단독의 놀이-9980 가짜(정지 영상이 놀이로,
+         핀 오염 방향)를 정확히 제거하며 재현 무손실 = 안정 4/6.
+         프루닝 지시의 요체: "빈약·애매 ≠ 모순"(v1은 발소리 없다고 산책 영상을,
+         동물병원 라벨 보고 카페 후보를 과잉 제거 — v2 문구가 해소).
+      기각 계보: 1단에 모순 규칙 통합(카페·하이파이브 재현 소실 + 2단 vision 이
+      하이파이브를 못 받음 실측), think=True(추론 배회로 가짜·비결정), 예/아니오
+      분할(가짜 유출 — 융합 vision 포함 재확인). extras = 영상별 추가 관찰(모션 등).
+      잔여 한계: 카페-0066(증거 빈약 → 부분 매칭, 안전 방향), 산책-0199(밤 질주도
+      목줄 산책이라 라벨 판단 경계). 처방은 사람 태그.
     초소형 출력: 응답은 영상 이름 enum 배열뿐. 결과는 결정론 소독(enum 재검증).
     """
     import ollama
@@ -394,6 +496,7 @@ def match_keywords(profiles: dict[str, dict], keywords: list[str],
     schema = {"type": "object",
               "properties": {"videos": {"type": "array", "items": {"enum": names}}},
               "required": ["videos"]}
+    rec = {n: profile_text(profiles[n], extras.get(n)) for n in names}
     out: dict[str, list[str]] = {}
     for kw in kws:
         prompt = ("강아지 영상들의 관찰 기록이다(소리·장면분류·밝기·동작은 기계 "
@@ -407,5 +510,89 @@ def match_keywords(profiles: dict[str, dict], keywords: list[str],
             picked = json.loads(r.message.content).get("videos", [])
         except json.JSONDecodeError:
             picked = []
-        out[kw] = [n for n in dict.fromkeys(picked) if n in profiles]
+        cand = [n for n in dict.fromkeys(picked) if n in profiles]
+        out[kw] = _prune(kw, cand, rec)
     return out
+
+
+def _prune(kw: str, cand: list[str], rec: dict[str, str]) -> list[str]:
+    """프루닝 패스 — 후보 중 관찰과 '명백히 반대'인 것만 제거(출력⊆입력).
+
+    가짜 추가가 구조적으로 불가능한 검증 비대칭. '빈약·애매 ≠ 모순' 문구가 핵심
+    (없으면 과잉 프루닝 — 산책·카페 후보 소실 실측).
+    """
+    import ollama
+    if not cand:
+        return cand
+    schema = {"type": "object",
+              "properties": {"remove": {"type": "array", "items": {"enum": cand}}},
+              "required": ["remove"]}
+    recs = "\n".join(f"[{n}] {rec[n]}" for n in cand)
+    prompt = (f"다음 영상들은 ‘{kw}’ 장면 후보로 뽑혔다. 관찰 기록이다.\n" + recs +
+              f"\n\n이 중 관찰이 ‘{kw}’ 와 *명백히 반대*인 영상만 골라 빼라"
+              "(예: 움직임이 필수인 상황인데 동작측정이 거의 정지). 관찰은 기계 "
+              "측정이라 틀릴 수 있고, 관찰이 부족하거나 애매한 것은 모순이 아니다 — "
+              "확실치 않으면 빼지 마라(빈 배열).")
+    r = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0}, format=schema, think=False)
+    try:
+        rm = set(json.loads(r.message.content).get("remove", []))
+    except json.JSONDecodeError:
+        rm = set()
+    return [n for n in cand if n not in rm]
+
+
+# --------------------------------------------------------------------------- #
+# 장면 전파 — 확정 영상과 "같은 장소"인 미매칭 영상에 태그 확장 (이중 AND 게이트)
+# --------------------------------------------------------------------------- #
+# 원리(2026-07-03 스파이크, 골든 9영상): 같은 장소 = 같은 배경 AND 같은 소리풍경.
+# 단일 채널은 전부 함정이 목표와 같은 높이 —
+#   시각(전역): 동종 실내·산책길 0.78~0.80 ≈ 목표 0.80 → 마스킹으로 실내 함정만 해소
+#   기하(ORB+RANSAC): 마룻바닥 반복무늬 가짜 정합(다른 실내 66 > 같은 카페 16) 기각
+#   오디오 단독: 말소리 편재(말소리 짝 0.88 > 목표 0.78)
+# AND 게이트에선 두 채널의 실패 모드가 서로를 차단한다(M4 logprob×모션 교차와 동형):
+#   목표 0.71/0.78 통과 · 실내 함정 0.52(시각 차단) · 산책길 0.80/0.35(오디오 차단)
+#   · 말소리 짝 0.25(시각 차단). 기증자는 1단 매칭 확정분만(전파 체이닝 금지).
+PROP_TAU_VIS = 0.65   # [잠정 n=9: 목표 0.71 vs 최고 함정 0.52]
+PROP_TAU_AUD = 0.70   # [잠정 n=9: 목표 0.78 vs 통과시각쌍 최고 0.60]
+
+
+def _cos(a: list, b: list) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    va, vb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    na, nb = np.linalg.norm(va), np.linalg.norm(vb)
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.dot(va, vb) / (na * nb))
+
+
+def same_place(pa: dict, pb: dict,
+               tau_vis: float = PROP_TAU_VIS, tau_aud: float = PROP_TAU_AUD) -> tuple:
+    """두 프로필이 '같은 장소'인가 — (판정, 시각cos, 오디오cos). 둘 다 임계 이상."""
+    vis = _cos(pa.get("scene_vec") or [], pb.get("scene_vec") or [])
+    aud = _cos(pa.get("audio_vec") or [], pb.get("audio_vec") or [])
+    return vis >= tau_vis and aud >= tau_aud, vis, aud
+
+
+def propagate_tags(profiles: dict[str, dict],
+                   matched: dict[str, list[str]]) -> dict[str, list[tuple]]:
+    """{키워드: [(영상, 기증영상, 시각cos, 오디오cos)]} — 매칭 확장분만 반환.
+
+    같은 방문에서 여러 클립을 찍는 임보 영상 분포에 맞춘 재현 보강. 기증자는
+    이 호출의 matched(1단 매칭+프루닝 확정분)로 한정 — 전파분이 다시 기증하는
+    체이닝은 금지(사진 앵커 2패스와 같은 보수 원칙).
+    """
+    adds: dict[str, list[tuple]] = {}
+    for kw, donors in matched.items():
+        if not donors:
+            continue
+        for u in profiles:
+            if u in donors:
+                continue
+            for d in donors:
+                ok, vis, aud = same_place(profiles[u], profiles[d])
+                if ok:
+                    adds.setdefault(kw, []).append((u, d, round(vis, 3), round(aud, 3)))
+                    break
+    return adds

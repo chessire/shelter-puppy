@@ -257,14 +257,20 @@ def _infer_scenes(ws: Workspace, names: list[str], plan) -> None:
             for n in hit:
                 auto[n] = sorted(set(auto.get(n, [])) | {kw})
 
-    from .m4_action.observe import ensure_profiles, match_keywords, motion_summary
+    from .m4_action.observe import (ensure_profiles, match_keywords,
+                                    motion_summary, propagate_tags)
     profiles = ensure_profiles(ws, targets)   # 구잡(프로필 없는 prepare) 지연 빌드
     motions = {n: m for n in targets if (m := motion_summary(ws, n))}
     print(f"[장면추론] 프로필 매칭 — 키워드 {new_kws} ↔ 영상 {len(profiles)}개…")
     matched = match_keywords(profiles, new_kws, extras=motions)
-    _merge(matched)
     for kw, hit in matched.items():
         print(f"     '{kw}' → {hit or '(없음)'}")
+    # 장면 전파: 확정 영상과 "같은 장소"(배경 AND 소리풍경)인 미매칭 영상에 확장
+    for kw, exts in propagate_tags(profiles, matched).items():
+        for u, d, vis, aud in exts:
+            matched[kw].append(u)
+            print(f"     '{kw}' 전파: {u} (시각 {vis:.2f}·오디오 {aud:.2f} ← {d})")
+    _merge(matched)
 
     pending = [kw for kw in new_kws if not matched.get(kw)]
     if pending:
