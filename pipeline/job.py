@@ -150,9 +150,12 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
     max_dogs = max((len(t) for t in per_video.values()), default=0)
     candidates = {name: sorted(t, key=t.get, reverse=True) for name, t in per_video.items()}
 
-    # 장면 태그는 여기서 만들지 않는다(2026-07-03 재설계) — 고정 어휘 선태깅은
-    # 임보자가 무슨 영상을 줄지 모르므로 구조적 사각. 요청 키워드가 곧 보기가 되는
-    # 요청 주도 추론을 render 단계(요청을 아는 시점)에서 수행한다. 사람 태그는 우선.
+    # 상비 관찰(2026-07-03 장면추론 설계) — 어휘 없는 닫힌 축 센서(오디오·장면분류·
+    # 휘도) + 자유 캡션 = 영상별 관찰 프로필. 폐기된 '고정 어휘 선태깅'과 다르다:
+    # 저건 상황의 열거(구조적 사각), 이건 센서의 열거(축 전체 커버, M3 전례).
+    # 어휘가 필요한 매칭은 여전히 render(요청을 아는 시점)에서 요청 주도로 한다.
+    from .m4_action.observe import ensure_profiles
+    ensure_profiles(ws, names)
 
     # 사람이 이미 확정한 임보견(foster_auto/foster_track)은 재판정으로 뒤집지 않는다 —
     # 안 그러면 다견 확정 후 재실행할 때마다 needs_foster_pick 으로 되돌아가 무한 대기.
@@ -228,10 +231,14 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
 
 
 def _infer_scenes(ws: Workspace, names: list[str], plan) -> None:
-    """요청 주도 장면 추론 — 플랜의 키워드를 보기로, 사람 태그 없는 영상만.
+    """요청 주도 장면 추론 — 에스컬레이션 사다리(2026-07-03 장면추론 설계).
 
-    고정 어휘 없음(2026-07-03): 보기 = Gemma interpret 가 이 요청에서 뽑은 키워드들.
-    결과는 meta.scene_tags_auto 에 누적(키워드별 캐시 — 재렌더 시 새 키워드만 질문).
+    ① 관찰 프로필 텍스트 매칭: prepare 가 쌓은 프로필(오디오·장면분류·휘도·캡션)
+       ↔ 요청 키워드를 Gemma *텍스트* 판정(vision 불필요, 싸다). 오디오가 카페·비
+       같은 스틸 사각을 뚫는 자리(스파이크 실측).
+    ② 프로필로 못 잡은 키워드만 기존 표적 vision 다지선다(scene_auto)로 승급.
+    보기 = Gemma interpret 가 이 요청에서 뽑은 키워드들(고정 어휘 없음). 결과는
+    meta.scene_tags_auto 에 누적(키워드별 캐시 — 재렌더 시 새 키워드만 질문).
     사람 태그(meta.scene_tags)가 있는 영상은 건드리지 않는다(사람 우선).
     """
     kws = [k for b in plan.blocks for k in (b.keywords or [])]
@@ -243,13 +250,32 @@ def _infer_scenes(ws: Workspace, names: list[str], plan) -> None:
     new_kws = [k for k in kws if k not in asked]
     if not (new_kws and targets):
         return
-    from .m4_action.scene_auto import infer_scene_tags
-    print(f"[장면추론] 요청 키워드 {new_kws} ↔ 영상 {len(targets)}개…")
-    inferred = infer_scene_tags(ws, targets, new_kws)
     auto = meta.get("scene_tags_auto") or {}
-    for n, tags in inferred.items():
-        auto[n] = sorted(set(auto.get(n, [])) | set(tags))
-        print(f"     {n}: {auto[n]}")
+
+    def _merge(kw_to_names: dict[str, list[str]]) -> None:
+        for kw, hit in kw_to_names.items():
+            for n in hit:
+                auto[n] = sorted(set(auto.get(n, [])) | {kw})
+
+    from .m4_action.observe import ensure_profiles, match_keywords, motion_summary
+    profiles = ensure_profiles(ws, targets)   # 구잡(프로필 없는 prepare) 지연 빌드
+    motions = {n: m for n in targets if (m := motion_summary(ws, n))}
+    print(f"[장면추론] 프로필 매칭 — 키워드 {new_kws} ↔ 영상 {len(profiles)}개…")
+    matched = match_keywords(profiles, new_kws, extras=motions)
+    _merge(matched)
+    for kw, hit in matched.items():
+        print(f"     '{kw}' → {hit or '(없음)'}")
+
+    pending = [kw for kw in new_kws if not matched.get(kw)]
+    if pending:
+        from .m4_action.scene_auto import infer_scene_tags
+        print(f"[장면추론] 표적 vision 승급 — 미해결 키워드 {pending}…")
+        inferred = infer_scene_tags(ws, targets, pending)
+        _merge({kw: [n for n, tags in inferred.items() if kw in tags]
+                for kw in pending})
+        for n, tags in inferred.items():
+            if tags:
+                print(f"     {n}: {tags}")
     ws.update_meta(scene_tags_auto=auto,
                    scene_keywords_asked=sorted(asked | set(new_kws)))
 

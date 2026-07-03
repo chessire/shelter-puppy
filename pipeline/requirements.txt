@@ -7,3 +7,7 @@ pytest>=8.0
 #   ultralytics  # YOLO 검출
 #   lap          # ByteTrack association
 #   pandas pyarrow  # parquet 리포트(선택)
+# 장면 추론 상비 관찰(observe.py, 2026-07-03):
+#   transformers  # AST 오디오 태깅(AudioSet 527) — HF 캐시에 모델 자동 다운로드
+#   torchaudio    # AST feature extractor 의존
+#   (Places365 ResNet18 가중치는 data/models/ 에 자동 다운로드)
