@@ -362,6 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dog-photos", nargs="+",
                    help="임보견 레퍼런스 사진(선택) — 다견 감지 시 사진 앵커로 자동 지정")
     p.add_argument("--request", help="자연어 편집요청(주면 render 까지)")
+    p.add_argument("--rerender", action="store_true",
+                   help="저장된 요청(meta.request)으로 재렌더 — 분석·태그·장면·TTS 캐시를 "
+                        "전부 재사용하는 빠른 재뽑기(예: TTS 복권 다시 긁기)")
     p.add_argument("--prepare-only", action="store_true", help="prepare 까지만")
     p.add_argument("--data-root", default=None, help="잡 저장 루트(기본 $DATA_ROOT 또는 ./jobs)")
     p.add_argument("--size", default="1080x1920")
@@ -377,6 +380,12 @@ def main(argv: list[str] | None = None) -> int:
         ws = Workspace.job(args.job_id, args.data_root)
         if not ws.meta_path.exists():
             raise SystemExit(f"{ws.root}: 기존 잡 없음. --inputs 로 생성하세요.")
+
+    if args.rerender and not args.request:      # 명시 --request 가 있으면 그쪽 우선
+        args.request = ws.read_meta().get("request")
+        if not args.request:
+            raise SystemExit(f"{ws.root}: 저장된 요청 없음 — 먼저 --request 로 렌더하세요.")
+        print(f"[재렌더] 저장된 요청 재사용: {args.request[:60]}…")
 
     meta = prepare(ws, weights=args.weights, conf=args.conf)
 
