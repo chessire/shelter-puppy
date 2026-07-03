@@ -47,8 +47,8 @@ def _foster_boxes(name: str, ws: Workspace) -> dict:
     if key not in _foster_cache:
         try:
             _foster_cache[key] = _foster_boxes_provider(name, ws)  # GT 또는 pred
-        except SystemExit:
-            _foster_cache[key] = {}
+        except (SystemExit, FileNotFoundError):
+            _foster_cache[key] = {}    # 박스 없음 = 크롭·존재 필터 미적용(안전한 저하)
     return _foster_cache[key]
 
 
@@ -146,20 +146,57 @@ def _scene_filter(sources: list[tuple[str, str]], keywords: list,
 
 
 def _block_sources(sources: list[tuple[str, str]], intent: EditBlock,
-                   ws: Workspace) -> tuple[list[tuple[str, str]], set]:
+                   ws: Workspace) -> tuple[list[tuple[str, str]], set, set]:
     """블록의 소스 결정 — 저작 직접 지정(sources) 우선, 없으면 키워드 매칭.
 
-    저작 모드(author.py)는 구성 작가가 관찰 프로필을 보고 소재를 직접 고르므로
-    키워드 왕복이 불필요하다. 지정 이름이 실제 소스와 하나도 안 맞으면(환각·소독
-    이후에도) 키워드 경로로 폴백 — 안전한 저하. 지정 소스 = 핀(예약·uncertain 면제,
-    작가가 모션 관찰까지 보고 골랐으므로 키워드 핀과 같은 결).
+    반환 (소스들, uncertain 면제 집합, 예약 집합) — **핀 의미 분리(2026-07-03)**:
+    유저 키워드 핀은 "그 장면을 콕 집었다"는 보증이라 면제+예약 둘 다. 저작 직접
+    지정은 *영상 단위* 선택일 뿐 구간 검증이 아니므로 예약만 — 면제까지 주면 지정
+    영상의 uncertain 구간(주인공 나가고 고양이 배회, cov24% 실측)이 유입된다
+    (complicated-demo2 사고). 지정 이름이 전멸이면 키워드 경로 폴백(안전한 저하).
     """
     names = set(intent.sources or [])
     if names:
         picked = [(m, p) for (m, p) in sources if Path(m).stem in names]
         if picked:
-            return picked, {m for m, _ in picked}
-    return _scene_filter(sources, intent.keywords, ws)
+            return picked, set(), {m for m, _ in picked}
+    picked, pinned = _scene_filter(sources, intent.keywords, ws)
+    return picked, pinned, pinned
+
+
+PRESENCE_GAP = 0.5   # 주인공 박스 공백 허용(초) — 검출 깜빡임은 부재로 안 본다
+
+
+def _presence_spans(boxes: dict, fps: float,
+                    gap: float = PRESENCE_GAP) -> list[tuple[float, float]]:
+    """주인공(지정 강아지) 박스가 있는 프레임들 → 존재 구간 [t0,t1] 리스트.
+
+    complicated-demo2 실측: 커밋 구간이어도 그 안의 '가장 긴 자유 구간'이 주인공
+    퇴장 창(고양이 배회·타견만 노는 순간)에 떨어질 수 있다 — 클립은 주인공이
+    화면에 있는 구간과 교차해서 뽑는다.
+    """
+    if not boxes:
+        return []
+    idxs = sorted(boxes)
+    spans, s, p = [], idxs[0], idxs[0]
+    for i in idxs[1:]:
+        if (i - p) / fps > gap:
+            spans.append((s / fps, p / fps))
+            s = i
+        p = i
+    spans.append((s / fps, p / fps))
+    return spans
+
+
+def _clip_to_spans(iv: tuple[float, float],
+                   spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """구간 iv 를 존재 구간들과 교차 — 잘린 조각들 반환."""
+    out = []
+    for a, b in spans:
+        lo, hi = max(iv[0], a), min(iv[1], b)
+        if hi > lo:
+            out.append((lo, hi))
+    return out
 
 
 def _free_intervals(mp4: str, s0: float, s1: float, exclude: set) -> list[tuple[float, float]]:
@@ -176,6 +213,9 @@ def _free_intervals(mp4: str, s0: float, s1: float, exclude: set) -> list[tuple[
     return [iv for iv in free if iv[1] - iv[0] >= 0.6]
 
 
+_ANALYSIS_FPS = 30.0   # P0 정규화 계약(CFR -r 30) — 박스 frame_idx 의 시간축
+
+
 def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
                      ws: Workspace | None = None,
                      exclude: set | None = None) -> list[tuple[str, float, float]]:
@@ -190,12 +230,15 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
     exclude = exclude or set()
     # 사용자가 키워드로 장면을 콕 집었으면(밤·카페 등) 그 소스는 M4 uncertain 이어도 쓴다.
     # (핀 우선 > M4 필터 — 검출 희소한 밤 footage 도 요청했으면 포함.)
-    # 핀은 소스 단위 — 키워드에 실제 매칭된 영상만 uncertain 면제. 저작 지정 소스도 동일.
-    sources, pinned_mp4s = _block_sources(sources, intent, ws)
+    # 유저 키워드 핀만 면제 — 저작 직접 지정은 예약만(핀 의미 분리, _block_sources).
+    sources, pinned_mp4s, _ = _block_sources(sources, intent, ws)
 
-    # 소스별 가장 긴 자유 매칭 구간 하나
+    # 소스별 가장 긴 자유 매칭 구간 하나 — 커밋 구간은 *주인공 존재 구간*과 교차
+    # (지정 강아지가 화면에 없는 창으로 클립이 떨어지는 사고 방지). uncertain 을
+    # 유저 핀으로 살린 소스는 검출 자체가 희소한 footage(밤)라 교차하지 않는다.
     cand: list[tuple[str, float, float]] = []
     for mp4, preds in sources:
+        spans = _presence_spans(_foster_boxes(Path(mp4).stem, ws), _ANALYSIS_FPS)
         free: list[tuple[float, float]] = []
         for s in io.read_action_segments(preds):
             if intent.select == "묘기":          # 묘기: 군 무관, gemma 가 확신한 재주만
@@ -206,7 +249,11 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
                     continue
                 if s.uncertain and mp4 not in pinned_mp4s:  # 군 모호 제외(핀된 소스만 면제)
                     continue
-            free += _free_intervals(mp4, s.start_t, s.end_t, exclude)
+            ivs = _free_intervals(mp4, s.start_t, s.end_t, exclude)
+            if spans and not s.uncertain:
+                ivs = [p for iv in ivs for p in _clip_to_spans(iv, spans)
+                       if p[1] - p[0] >= min_clip]
+            free += ivs
         if free:
             t0, t1 = max(free, key=lambda iv: iv[1] - iv[0])
             cand.append((mp4, t0, t1))
@@ -575,7 +622,7 @@ def allowed_sources_per_block(plan: EditPlan, sources, ws: Workspace) -> list[li
     """블록별 핀 계산 → 예약 적용. 렌더 전 1회 선계산(모드 A/B 공용).
 
     """
-    pins = [_block_sources(sources, b, ws)[1] for b in plan.blocks]
+    pins = [_block_sources(sources, b, ws)[2] for b in plan.blocks]
     return _apply_reservation(sources, pins)
 
 

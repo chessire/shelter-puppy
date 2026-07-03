@@ -347,18 +347,76 @@ def test_wrap_lines():
     assert _wrap_lines("짧다", None, measure, 100) == ["짧다"]
 
 
+# ── 주인공 존재 필터 (지정 강아지 없는 장면 유입 방지 — complicated-demo2 사고) ──
+
+def test_presence_spans():
+    from pipeline.m6_edit.run import _presence_spans
+    # 0~60프레임(0~2초) + 150~300프레임(5~10초), 30fps — 사이 3초 공백 = 부재
+    boxes = {i: None for i in list(range(0, 61)) + list(range(150, 301))}
+    assert _presence_spans(boxes, 30.0) == [(0.0, 2.0), (5.0, 10.0)]
+    # 0.5초 이하 깜빡임은 이어 붙임
+    boxes = {i: None for i in list(range(0, 31)) + list(range(40, 61))}
+    assert _presence_spans(boxes, 30.0) == [(0.0, 2.0)]
+    assert _presence_spans({}, 30.0) == []
+
+
+def test_compile_clips_to_presence(monkeypatch, tmp_path):
+    """커밋 구간이어도 클립은 주인공이 화면에 있는 창에서만 나온다."""
+    from pipeline.m6_edit import run as m6run
+    seg = {"start_t": 0, "end_t": 10, "group": "dynamic", "action": "걷기",
+           "conf": 1.0, "uncertain": False}
+    sources = [("/x/V.mp4", _pred(tmp_path, "V", [seg]))]
+    # 주인공 존재: 0~2초, 5~10초 — 최장 자유 구간(0~10)이 부재 창(2~5)을 포함
+    boxes = {i: None for i in list(range(0, 61)) + list(range(150, 301))}
+    monkeypatch.setattr(m6run, "_foster_boxes", lambda n, ws: boxes)
+    clips = m6run.compile_editlist(EditBlock(select="dynamic", target_dur=8.0),
+                                   sources, ws=Workspace(tmp_path))
+    (mp4, t0, t1), = clips
+    assert (t0, t1) == (5.0, 10.0)             # 부재 창(2~5) 회피, 최장 존재 조각
+
+
+def test_author_sources_no_uncertain_exemption(monkeypatch, tmp_path):
+    """저작 직접 지정은 예약만 — uncertain 구간(고양이 배회)은 못 쓴다."""
+    from pipeline.m6_edit import run as m6run
+    seg = {"start_t": 0, "end_t": 10, "group": "dynamic", "action": "걷기",
+           "conf": 1.0, "uncertain": True}
+    sources = [("/x/V.mp4", _pred(tmp_path, "V", [seg]))]
+    monkeypatch.setattr(m6run, "_foster_boxes", lambda n, ws: {})
+    clips = m6run.compile_editlist(EditBlock(select="dynamic", sources=["V"]),
+                                   sources, ws=Workspace(tmp_path))
+    assert clips == []                          # 면제 없음 → uncertain 제외
+
+
+def test_keyword_pin_keeps_uncertain(monkeypatch, tmp_path):
+    """유저 키워드 핀(밤 등)은 면제 유지 + 존재 교차도 안 함(검출 희소 footage)."""
+    from pipeline.m6_edit import run as m6run
+    ws = Workspace(tmp_path)
+    ws.write_meta({"scene_tags": {"V": ["밤"]}})
+    seg = {"start_t": 0, "end_t": 10, "group": "dynamic", "action": "걷기",
+           "conf": 1.0, "uncertain": True}
+    sources = [("/x/V.mp4", _pred(tmp_path, "V", [seg]))]
+    monkeypatch.setattr(m6run, "_foster_boxes",
+                        lambda n, w: {i: None for i in range(0, 30)})  # 검출 1초뿐
+    clips = m6run.compile_editlist(EditBlock(select="dynamic", keywords=["밤"],
+                                             target_dur=5.0),
+                                   sources, ws=ws)
+    (mp4, t0, t1), = clips
+    assert t1 - t0 == 5.0                       # 핀 = 면제 + 교차 미적용(전 구간 사용)
+
+
 # ── 블록 소스 필터 (저작 직접 지정 우선, 전멸 시 키워드 폴백) ──────────────
 
 def test_block_sources_direct_pick(tmp_path):
     sources = [("/x/IMG_A.mp4", "a.json"), ("/x/IMG_B.mp4", "b.json")]
     b = EditBlock(sources=["IMG_B"])
-    picked, pinned = _block_sources(sources, b, Workspace(tmp_path))
+    picked, exempt, reserve = _block_sources(sources, b, Workspace(tmp_path))
     assert [m for m, _ in picked] == ["/x/IMG_B.mp4"]
-    assert pinned == {"/x/IMG_B.mp4"}                  # 지정 = 핀(예약·면제)
+    # 핀 의미 분리: 저작 지정 = 예약만, uncertain 면제는 유저 키워드 핀 전용
+    assert exempt == set() and reserve == {"/x/IMG_B.mp4"}
 
 
 def test_block_sources_fallback_when_no_match(tmp_path):
     sources = [("/x/IMG_A.mp4", "a.json")]
     b = EditBlock(sources=["IMG_Z"])                   # 전멸 → 키워드 경로 폴백
-    picked, pinned = _block_sources(sources, b, Workspace(tmp_path))
-    assert picked == sources and pinned == set()       # 키워드도 없음 = 전체·핀 없음
+    picked, exempt, reserve = _block_sources(sources, b, Workspace(tmp_path))
+    assert picked == sources and exempt == set() == reserve
