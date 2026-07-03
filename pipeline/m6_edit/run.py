@@ -58,7 +58,7 @@ def interpret_plan(request: str) -> EditPlan:
     """자연어 편집요청 → 구성형 EditPlan(전역 title + 순서 있는 블록들)."""
     import ollama
     prompt = (
-        "너는 강아지 입양영상 자동편집기다. 편집요청을 *순서 있는 블록들*로 분해해라.\n"
+        "너는 강아지 영상 자동편집기다. 편집요청을 *순서 있는 블록들*로 분해해라.\n"
         "각 블록 = 영상의 한 구간 연출. '먼저/그다음/마지막에' 같은 순서 표현은 "
         "블록을 나눠서 표현한다. 순서 언급이 없으면 블록 1개.\n"
         "블록 필드:\n"
@@ -67,7 +67,7 @@ def interpret_plan(request: str) -> EditPlan:
         "- target_dur: 그 구간 목표 길이(초). 명시 안 했으면 0.\n"
         "- pace: 빠른컷=fast, 잔잔=calm\n"
         "- transition: 컷=cut, 부드러운전환/디졸브=xfade\n"
-        "- subject: 임보견을 화면 주인공으로 당겨라=foster, 전체화면=full\n"
+        "- subject: 강아지를 화면 주인공으로 당겨라=foster, 전체화면=full\n"
         "- zoom: 점점 확대/클로즈업=gradual(정적 구간에만), 아니면 none\n"
         "- speed: 요청이 슬로우/배속을 *명시*한 경우만(슬로우=0.5, 빠르게=2), 아니면 1\n"
         "- caption: 그 블록 동안 화면 아래 띄울 한글 자막. 없으면 빈 문자열.\n"
@@ -138,6 +138,23 @@ def _scene_filter(sources: list[tuple[str, str]], keywords: list,
     return sources, pinned              # 부분 매칭 → 배제 없이 전체, 핀은 매칭 소스만
 
 
+def _block_sources(sources: list[tuple[str, str]], intent: EditBlock,
+                   ws: Workspace) -> tuple[list[tuple[str, str]], set]:
+    """블록의 소스 결정 — 저작 직접 지정(sources) 우선, 없으면 키워드 매칭.
+
+    저작 모드(author.py)는 구성 작가가 관찰 프로필을 보고 소재를 직접 고르므로
+    키워드 왕복이 불필요하다. 지정 이름이 실제 소스와 하나도 안 맞으면(환각·소독
+    이후에도) 키워드 경로로 폴백 — 안전한 저하. 지정 소스 = 핀(예약·uncertain 면제,
+    작가가 모션 관찰까지 보고 골랐으므로 키워드 핀과 같은 결).
+    """
+    names = set(intent.sources or [])
+    if names:
+        picked = [(m, p) for (m, p) in sources if Path(m).stem in names]
+        if picked:
+            return picked, {m for m, _ in picked}
+    return _scene_filter(sources, intent.keywords, ws)
+
+
 def _free_intervals(mp4: str, s0: float, s1: float, exclude: set) -> list[tuple[float, float]]:
     """구간 [s0,s1] 에서 exclude(같은 mp4 가 이미 쓴 부분)를 뺀 자유 구간들."""
     used = sorted((e[1], e[2]) for e in exclude
@@ -166,8 +183,8 @@ def compile_editlist(intent: EditBlock, sources: list[tuple[str, str]],
     exclude = exclude or set()
     # 사용자가 키워드로 장면을 콕 집었으면(밤·카페 등) 그 소스는 M4 uncertain 이어도 쓴다.
     # (핀 우선 > M4 필터 — 검출 희소한 밤 footage 도 요청했으면 포함.)
-    # 핀은 소스 단위 — 키워드에 실제 매칭된 영상만 uncertain 면제.
-    sources, pinned_mp4s = _scene_filter(sources, intent.keywords, ws)
+    # 핀은 소스 단위 — 키워드에 실제 매칭된 영상만 uncertain 면제. 저작 지정 소스도 동일.
+    sources, pinned_mp4s = _block_sources(sources, intent, ws)
 
     # 소스별 가장 긴 자유 매칭 구간 하나
     cand: list[tuple[str, float, float]] = []
@@ -442,7 +459,7 @@ def allowed_sources_per_block(plan: EditPlan, sources, ws: Workspace) -> list[li
     """블록별 핀 계산 → 예약 적용. 렌더 전 1회 선계산(모드 A/B 공용).
 
     """
-    pins = [_scene_filter(sources, b.keywords, ws)[1] for b in plan.blocks]
+    pins = [_block_sources(sources, b, ws)[1] for b in plan.blocks]
     return _apply_reservation(sources, pins)
 
 

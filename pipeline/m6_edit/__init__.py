@@ -65,6 +65,10 @@ class EditBlock:
     keywords: list = None        # 장면 키워드(사용자 표현) — 매칭+핀. 비면 전체 소스.
     scene: str = ""              # 장면 묘사 문구(요청 표현 그대로) — 추론 대조용(예비)
     narration: str = ""          # 모드 A: 이 블록 동안 읽을 내레이션 구절(빈값=무음 블록)
+    # 저작 모드 전용(author.py): 소재 이름 직접 지정 — 구성 작가가 관찰 프로필을 보고
+    # 골랐으므로 키워드 매칭 왕복 없이 그 소스만 쓴다(핀·예약 의미론 동일). 번역
+    # 프롬프트(_BLOCK_PROPS)에는 없다 — interpret 가 이름을 지어내면 안 되므로.
+    sources: list = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "EditBlock":
@@ -81,6 +85,7 @@ class EditBlock:
             keywords=[str(k) for k in (d.get("keywords") or [])],
             scene=str(d.get("scene", "") or ""),
             narration=str(d.get("narration", "") or ""),
+            sources=[str(s) for s in (d.get("sources") or [])],
         )
 
 

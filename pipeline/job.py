@@ -135,9 +135,15 @@ def prepare(ws: Workspace, weights: str = "yolo11m.pt", conf: float = 0.25,
 
     for name in names:
         # 재실행(다견 확정 후 등) 시 P0/M1 재계산 방지 — 분석은 영상당 1회(M4 재사용과 동일 결).
-        if ws.analysis(name).exists() and ws.preds_m1(name).exists():
+        # 재사용 조건에 '검출 0이 아님'을 포함 — P0 산출물이 깨지면(실측: NAL 오류 mp4)
+        # M1 이 빈 pred 를 남기고, 존재 여부만 보면 그 깨진 캐시가 영구 고착된다.
+        if (ws.analysis(name).exists() and ws.preds_m1(name).exists()
+                and ws.preds_m1(name).stat().st_size > 0):
             print(f"[P0+M1] {name} 재사용")
             continue
+        if ws.preds_m1(name).exists():
+            print(f"[P0+M1] {name} 빈 pred 감지 — 정규화·검출 재시도")
+            ws.analysis(name).unlink(missing_ok=True)
         src = ws.source_video(name)
         print(f"[P0] {name} 정규화…")
         normalize(src, ws.analysis_dir)
@@ -331,16 +337,34 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
 
     sources = [(str(ws.analysis(n)), str(ws.preds_m4(n))) for n in names]
     out_path = ws.out(out_name)
+
+    def _maybe_author(plan, want_narration: bool):
+        """구조 없는 요청 → 저작(구성 작가). 소재 인지 창작이라 실행마다 다를 수 있음
+        (의도된 비결정 — --rerender = 구성 복권). 실패 시 번역 플랜 유지(안전한 저하)."""
+        from .m6_edit.author import author_plan, is_unstructured, script_invented
+        if not (is_unstructured(plan) or script_invented(plan, request)):
+            return plan
+        print("[저작] 요청에 구성 없음 → 관찰 프로필로 구성·대본 창작…")
+        authored = author_plan(request, ws, names, narration=want_narration)
+        if authored is None:
+            print("     저작 실패 — 번역 플랜으로 폴백")
+            return plan
+        for i, b in enumerate(authored.blocks):
+            print(f"     블록{i}: {b.sources} select={b.select} dur={b.target_dur} "
+                  f"zoom={b.zoom} caption={b.caption!r}"
+                  + (f" narration={b.narration!r}" if b.narration else ""))
+        return authored
+
     if mode == "narration":
         print("[M5+M6] 대본 분해·합성·렌더…")
-        plan = interpret_narration(request)
+        plan = _maybe_author(interpret_narration(request), True)
         n_narr = sum(1 for b in plan.blocks if b.narration)
         print(f"     블록 {len(plan.blocks)}개 (내레이션 {n_narr}구절, 보이스 {voice})")
         _infer_scenes(ws, names, plan)
         render_narrated(plan, sources, str(out_path), size, fps, ws=ws, voice=voice)
     else:
         print("[M6] 편집 인텐트 해석…")
-        plan = interpret_plan(request)
+        plan = _maybe_author(interpret_plan(request), False)
         print(f"     title={plan.title!r}  블록 {len(plan.blocks)}개")
         _infer_scenes(ws, names, plan)
         raw = out_path.with_name("_raw_" + out_name)
