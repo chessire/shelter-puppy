@@ -723,7 +723,8 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
             print(f"  [카피] ⚠️ texts[{k}] 대상 블록 전멸 → 드롭: {tx.text[:20]!r}")
             continue
         w0, w1 = bounds[sel[0][0]][0], bounds[sel[-1][0]][1]
-        win = layout.resolve_window(w0, w1, tx.span, layout.required_secs(tx.text))
+        # span 미지정 카피는 읽을 만큼 보였다 사라진다(copy_window) — 상시는 title 몫.
+        win = layout.copy_window(w0, w1, tx.span, tx.text)
         if win is None:
             print(f"  [가독성] ⚠️ texts[{k}] {len(tx.text)}자를 {w1 - w0:.1f}s 창에 "
                   f"못 읽음 → 드롭 — 저작 예산 프롬프트 점검 신호")

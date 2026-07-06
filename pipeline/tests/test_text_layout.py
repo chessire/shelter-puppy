@@ -72,6 +72,29 @@ def test_resolve_window_drop_when_range_too_short():
     assert layout.resolve_window(0.0, 2.0, None, req=3.0) is None
 
 
+def test_copy_window_default_dwells_then_disappears():
+    # span 미지정 = 읽을 만큼 보였다 사라짐 — '심쿵 주의보!'(7자, req=하한 1.5s)가
+    # 21초 범위 내내 떠 있던 실측 피드백(2026-07-06)의 수정.
+    win = layout.copy_window(0.0, 21.0, None, "심쿵 주의보!")
+    assert win is not None and win[0] == 0.0
+    assert abs(win[1] - layout.TEXT_MIN_SHOW * layout.DWELL_FACTOR) < 1e-9
+
+
+def test_copy_window_dwell_capped_by_range():
+    win = layout.copy_window(0.0, 2.0, None, "짧은 카피")   # 범위(2s)가 체류보다 짧음
+    assert win == (0.0, 2.0)
+
+
+def test_copy_window_explicit_span_respected():
+    # 명시 span 은 체류 기본값을 안 탄다 — [0,1] = 내내(저작이 상시를 의도한 것)
+    assert layout.copy_window(0.0, 10.0, [0.0, 1.0], "카피") == (0.0, 10.0)
+    assert layout.copy_window(0.0, 10.0, [0.5, 0.9], "카피") == (5.0, 9.0)
+
+
+def test_copy_window_unreadable_still_drops():
+    assert layout.copy_window(0.0, 2.0, None, "가" * 120) is None
+
+
 # ── PlanText 소독 ──────────────────────────────────────────────────────────
 
 def test_plantext_from_dict_sanitizes():

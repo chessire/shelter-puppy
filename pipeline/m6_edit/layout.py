@@ -75,6 +75,12 @@ def required_secs(text: str, cps: float = READ_CPS,
     return max(floor, len((text or "").strip()) / cps)
 
 
+# 카피 체류 배수 — 표시 시간 = 읽기 시간 × 이 배수. 카피는 상시가 아니라 "보였다
+# 사라지는" 것(2026-07-06 사용자: '심쿵 주의보!'가 장면을 넘어 계속 떠 있으니 이상,
+# 뜬 순간은 딱 좋았음 — 상시는 title 의 몫). [잠정 — 취향 배터리로 보정]
+DWELL_FACTOR = 2.0
+
+
 def resolve_window(w0: float, w1: float, span: list | None,
                    req: float) -> tuple[float, float] | None:
     """표시창 확정 — [w0,w1](블록 범위 실측 창)에 span 비율 적용 후 가독성 검증.
@@ -90,3 +96,19 @@ def resolve_window(w0: float, w1: float, span: list | None,
     if b - a + 1e-6 < req:
         a, b = w0, w1
     return (a, b) if b - a + 1e-6 >= req else None
+
+
+def copy_window(w0: float, w1: float, span: list | None,
+                text: str) -> tuple[float, float] | None:
+    """카피(PlanText) 표시창 — span 명시는 존중, 미지정 기본은 '읽을 만큼 보였다
+    사라짐'(범위 시작에서 읽기 시간 × DWELL_FACTOR 만 표시).
+
+    span=None 이 '내내'가 아닌 이유(2026-07-06 사용자): 장면 여러 개에 걸치는 건
+    *자리 잡을 창*이지 체류 시간이 아니다 — 펀치 카피가 장면을 넘어 계속 떠 있으면
+    이상하다. 내내 띄우려면 저작이 span [0,1] 을 명시한다(프롬프트에 문서화).
+    """
+    req = required_secs(text)
+    win = resolve_window(w0, w1, span, req)
+    if win is None or span is not None:
+        return win
+    return (win[0], min(win[1], win[0] + req * DWELL_FACTOR))
