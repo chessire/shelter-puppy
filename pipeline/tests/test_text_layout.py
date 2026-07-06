@@ -36,12 +36,31 @@ def test_pick_region_avoids_subject():
     assert layout.pick_region(rects, []) == "bottom"   # 박스 없음 → 관행 1순위
 
 
-def test_pick_region_respects_taken():
-    rects = {"bottom": (0, 80, 100, 100), "top": (0, 0, 100, 20),
-             "left": (0, 40, 20, 60)}
-    dog_bottom = [(10, 85, 90, 95)]
-    taken = [(0, 0, 100, 20)]                       # top 은 이미 title 자리
-    assert layout.pick_region(rects, dog_bottom, taken) == "left"
+def test_pick_region_respects_taken_and_adjacency():
+    rects = {p: (0, 0, 10, 10) for p in layout.AUTO_ORDER}
+    # top 이 title 자리 → top 은 물론 인접 구석(top-left)도 제외(붙은 자리 금지)
+    pos = layout.pick_region(rects, [], taken=["top"])
+    assert pos == "bottom"
+    pos = layout.pick_region(rects, [], taken=["top", "bottom"])
+    assert pos not in (None, "top", "top-left", "bottom", "bottom-left", "bottom-right")
+
+
+def test_pick_region_none_when_everything_conflicts():
+    rects = {p: (0, 0, 10, 10) for p in layout.AUTO_ORDER}
+    taken = ["top", "bottom", "left", "right"]      # 4방위 점유 → 구석 전부 인접
+    assert layout.pick_region(rects, [], taken=taken) is None
+
+
+def test_conflicts_adjacency_pairs():
+    # 사용자 확정(2026-07-06): 상단+좌·우상단, 하단+좌·우하단, 좌단+좌상·좌하단,
+    # 우단+우상·우하단은 같은 시간에 함께 못 쓴다. 대각(상단+좌하단 등)은 허용.
+    assert layout.conflicts("top", "top-left") and layout.conflicts("top-left", "top")
+    assert layout.conflicts("bottom", "bottom-right")
+    assert layout.conflicts("left", "bottom-left")
+    assert layout.conflicts("right", "top-right")
+    assert layout.conflicts("top", "top")           # 같은 자리
+    assert not layout.conflicts("top", "bottom-left")
+    assert not layout.conflicts("top-left", "bottom-right")
 
 
 def test_pick_region_all_occupied_falls_back_to_min():
@@ -72,27 +91,48 @@ def test_resolve_window_drop_when_range_too_short():
     assert layout.resolve_window(0.0, 2.0, None, req=3.0) is None
 
 
-def test_copy_window_default_dwells_then_disappears():
+def test_place_copy_default_dwells_then_disappears():
     # span 미지정 = 읽을 만큼 보였다 사라짐 — '심쿵 주의보!'(7자, req=하한 1.5s)가
     # 21초 범위 내내 떠 있던 실측 피드백(2026-07-06)의 수정.
-    win = layout.copy_window(0.0, 21.0, None, "심쿵 주의보!")
+    win = layout.place_copy(0.0, 21.0, None, "심쿵 주의보!", [])
     assert win is not None and win[0] == 0.0
     assert abs(win[1] - layout.TEXT_MIN_SHOW * layout.DWELL_FACTOR) < 1e-9
 
 
-def test_copy_window_dwell_capped_by_range():
-    win = layout.copy_window(0.0, 2.0, None, "짧은 카피")   # 범위(2s)가 체류보다 짧음
+def test_place_copy_dwell_capped_by_range():
+    win = layout.place_copy(0.0, 2.0, None, "짧은 카피", [])   # 범위가 체류보다 짧음
     assert win == (0.0, 2.0)
 
 
-def test_copy_window_explicit_span_respected():
+def test_place_copy_explicit_span_respected():
     # 명시 span 은 체류 기본값을 안 탄다 — [0,1] = 내내(저작이 상시를 의도한 것)
-    assert layout.copy_window(0.0, 10.0, [0.0, 1.0], "카피") == (0.0, 10.0)
-    assert layout.copy_window(0.0, 10.0, [0.5, 0.9], "카피") == (5.0, 9.0)
+    assert layout.place_copy(0.0, 10.0, [0.0, 1.0], "카피", []) == (0.0, 10.0)
+    assert layout.place_copy(0.0, 10.0, [0.5, 0.9], "카피", []) == (5.0, 9.0)
 
 
-def test_copy_window_unreadable_still_drops():
-    assert layout.copy_window(0.0, 2.0, None, "가" * 120) is None
+def test_place_copy_unreadable_drops():
+    assert layout.place_copy(0.0, 2.0, None, "가" * 120, []) is None
+
+
+def test_place_copy_waits_for_concurrency_gap():
+    # 동시 상한 2(사용자 확정): title(상시) + 블록0 자막(0~5s)이 이미 2개 →
+    # 카피는 자막이 끝나는 5s 에서야 뜬다(카피는 보조 — 항상 양보).
+    windows = [(0.0, 21.0), (0.0, 5.0)]
+    win = layout.place_copy(0.0, 21.0, None, "심쿵 주의보!", windows)
+    assert win is not None and abs(win[0] - 5.0) < 1e-9
+
+
+def test_place_copy_drops_when_no_gap():
+    # title 상시 + 자막이 전 구간 연속 = 어디에 얹어도 3개 → 드롭
+    windows = [(0.0, 10.0), (0.0, 5.0), (5.0, 10.0)]
+    assert layout.place_copy(0.0, 10.0, None, "카피", windows) is None
+
+
+def test_place_copy_explicit_span_clipped_to_gap():
+    # 명시 span 창이 상한과 부분 충돌 → 자유 조각과의 교집합으로 잘려 배치
+    windows = [(0.0, 10.0), (0.0, 4.0)]             # title + 앞 자막
+    win = layout.place_copy(0.0, 10.0, [0.0, 0.8], "카피", windows)
+    assert win is not None and abs(win[0] - 4.0) < 1e-9 and abs(win[1] - 8.0) < 1e-9
 
 
 # ── PlanText 소독 ──────────────────────────────────────────────────────────
@@ -170,10 +210,10 @@ def test_to_plan_author_caption_defaults_auto():
 
 
 def test_to_plan_demotes_collisions_with_fixtures():
-    # 상시 요소 충돌 소독 — title 있으면 top, 항상 top-right → auto (실측 회귀)
+    # 상시 요소 충돌 소독 — title 있으면 top·top-left(인접), 항상 top-right → auto
     raw = _raw([{"text": "카피", "blocks": [0, 1], "pos": "top"}])
     raw["title"] = "제목"
-    raw["blocks"][0]["caption_pos"] = "top"
+    raw["blocks"][0]["caption_pos"] = "top-left"
     raw["blocks"][1]["caption_pos"] = "top-right"
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False)
     assert plan.blocks[0].caption_pos == AUTO_POS

@@ -53,20 +53,21 @@ def occupancy(rect: tuple, boxes: list[tuple]) -> float:
 
 
 def pick_region(rects: dict[str, tuple], boxes: list[tuple],
-                taken: list[tuple] = (), order: tuple = AUTO_ORDER,
-                thresh: float = OCC_MAX) -> str:
-    """빈 영역 선택 — 후보 순서대로 ①이미 놓인 텍스트(taken)와 무겹침 ②주인공
-    겹침 ≤ thresh 인 첫 영역. 전부 막히면 taken 무겹침 중 주인공 겹침 최소
-    (그마저 없으면 후보 첫 자리 — 텍스트를 안 띄우는 건 이 함수의 권한이 아니다).
+                taken: list = (), order: tuple = AUTO_ORDER,
+                thresh: float = OCC_MAX) -> str | None:
+    """빈 영역 선택 — 후보 순서대로 ①같은 시간에 보이는 텍스트(taken, 영역 이름들)와
+    같거나 인접(ADJACENT)하지 않고 ②주인공 겹침 ≤ thresh 인 첫 영역. 겹침만 남으면
+    최소 겹침 영역, 인접까지 전부 막히면 None(호출부가 드롭/폴백 — 붙은 자리에
+    구겨 넣는 건 이 함수의 권한이 아니다).
     """
     cands = [p for p in order if p in rects
-             and not any(rect_overlap(rects[p], t) > 0 for t in taken)]
+             and not any(conflicts(p, t) for t in taken)]
     for pos in cands:
         if occupancy(rects[pos], boxes) <= thresh:
             return pos
     if cands:
         return min(cands, key=lambda p: occupancy(rects[p], boxes))
-    return next((p for p in order if p in rects), "bottom")
+    return None
 
 
 def required_secs(text: str, cps: float = READ_CPS,
@@ -79,6 +80,28 @@ def required_secs(text: str, cps: float = READ_CPS,
 # 사라지는" 것(2026-07-06 사용자: '심쿵 주의보!'가 장면을 넘어 계속 떠 있으니 이상,
 # 뜬 순간은 딱 좋았음 — 상시는 title 의 몫). [잠정 — 취향 배터리로 보정]
 DWELL_FACTOR = 2.0
+
+# 동시 표시 상한(title 포함) — "한번에 세 개 이상은 안 되겠다"(2026-07-06 사용자 확정).
+MAX_CONCURRENT = 2
+
+# 인접 영역 — 4방위와 그 이웃 구석을 *같은 시간에* 함께 쓰면 번인이 겹치는 느낌
+# (2026-07-06 사용자: 상단+좌·우상단, 하단+좌·우하단, 좌단+좌상·좌하단, 우단+우상·우하단).
+# 시간이 겹치는 텍스트끼리만 적용 — 순차 표시는 같은 영역도 재사용 가능.
+ADJACENT = {
+    "top": {"top-left", "top-right"},
+    "bottom": {"bottom-left", "bottom-right"},
+    "left": {"top-left", "bottom-left"},
+    "right": {"top-right", "bottom-right"},
+    "top-left": {"top", "left"},
+    "top-right": {"top", "right"},
+    "bottom-left": {"bottom", "left"},
+    "bottom-right": {"bottom", "right"},
+}
+
+
+def conflicts(a: str, b: str) -> bool:
+    """두 영역을 동시에 쓸 수 없나 — 같은 자리이거나 인접."""
+    return a == b or b in ADJACENT.get(a, set())
 
 
 def resolve_window(w0: float, w1: float, span: list | None,
@@ -98,17 +121,54 @@ def resolve_window(w0: float, w1: float, span: list | None,
     return (a, b) if b - a + 1e-6 >= req else None
 
 
-def copy_window(w0: float, w1: float, span: list | None,
-                text: str) -> tuple[float, float] | None:
-    """카피(PlanText) 표시창 — span 명시는 존중, 미지정 기본은 '읽을 만큼 보였다
-    사라짐'(범위 시작에서 읽기 시간 × DWELL_FACTOR 만 표시).
+def _busy(windows: list[tuple], k: int = MAX_CONCURRENT) -> list[tuple]:
+    """이미 k개 이상 보이는 구간들 — 여기에 하나 더 얹으면 상한 초과(이벤트 스윕)."""
+    evs = sorted([(w[0], 1) for w in windows] + [(w[1], -1) for w in windows],
+                 key=lambda e: (e[0], e[1]))          # 같은 시점은 끝(-1) 먼저
+    out, cnt, start = [], 0, None
+    for x, dv in evs:
+        cnt += dv
+        if cnt >= k and start is None:
+            start = x
+        elif cnt < k and start is not None:
+            out.append((start, x)); start = None
+    return out
 
-    span=None 이 '내내'가 아닌 이유(2026-07-06 사용자): 장면 여러 개에 걸치는 건
-    *자리 잡을 창*이지 체류 시간이 아니다 — 펀치 카피가 장면을 넘어 계속 떠 있으면
-    이상하다. 내내 띄우려면 저작이 span [0,1] 을 명시한다(프롬프트에 문서화).
+
+def _free(rng: tuple, busy: list[tuple]) -> list[tuple]:
+    """rng 에서 busy 구간들을 뺀 자유 조각들."""
+    free, cur = [], rng[0]
+    for b0, b1 in sorted(busy):
+        if b1 <= rng[0] or b0 >= rng[1]:
+            continue
+        if b0 > cur:
+            free.append((cur, min(b0, rng[1])))
+        cur = max(cur, b1)
+    if cur < rng[1]:
+        free.append((cur, rng[1]))
+    return free
+
+
+def place_copy(w0: float, w1: float, span: list | None, text: str,
+               windows: list[tuple]) -> tuple[float, float] | None:
+    """카피 표시창 — 동시 상한(MAX_CONCURRENT)을 지키는 틈에 배치.
+
+    windows = 이미 확정된 텍스트들(title·자막·선행 카피)의 표시창. 카피는 보조라
+    항상 양보하는 쪽(핀 예약과 같은 결 — 아는 것의 우선권을 결정론으로 보장).
+    ①span 명시 → 그 창과 자유 조각의 교집합에서 읽을 수 있는 첫 조각
+    ②미지정/실패 → 가장 이른 자유 조각에서 읽기 시간 × DWELL_FACTOR 만
+      "보였다 사라짐"(상시는 title 의 몫). 틈이 없으면 None(호출부 경고 드롭).
     """
     req = required_secs(text)
-    win = resolve_window(w0, w1, span, req)
-    if win is None or span is not None:
-        return win
-    return (win[0], min(win[1], win[0] + req * DWELL_FACTOR))
+    free = _free((w0, w1), _busy(windows))
+    if span:
+        a = w0 + (w1 - w0) * span[0]
+        b = w0 + (w1 - w0) * span[1]
+        for p0, p1 in free:
+            lo, hi = max(a, p0), min(b, p1)
+            if hi - lo + 1e-6 >= req:
+                return (lo, hi)
+    for p0, p1 in free:
+        if p1 - p0 + 1e-6 >= req:
+            return (p0, p0 + min(p1 - p0, req * DWELL_FACTOR))
+    return None

@@ -545,16 +545,15 @@ def _boxes_out(clips: list[tuple[str, float, float]], ws: Workspace,
 
 
 def _auto_pos(text: str, clips, ws: Workspace, size: tuple[int, int],
-              avoid: tuple = (), taken: list = ()) -> str:
+              taken: tuple = ()) -> str | None:
     """auto 위치 확정 — 주인공 박스가 비는 8방위 선택(layout.pick_region).
 
     위치는 구도의 사실이라 픽셀만 안다 — 저작은 auto 로 넘기고 여기서 결정론으로.
-    avoid = 영역 이름 제외(title 있으면 "top"), taken = 이미 놓인 텍스트 rect 들.
+    taken = 같은 시간에 보이는 텍스트들의 영역 이름(같음·인접 충돌 제외, ADJACENT).
     """
     W, H = size
-    order = tuple(p for p in layout.AUTO_ORDER if p not in avoid)
-    rects = {p: _text_rect(text, W, H, p) for p in order}
-    return layout.pick_region(rects, _boxes_out(clips, ws, W, H), list(taken), order)
+    rects = {p: _text_rect(text, W, H, p) for p in layout.AUTO_ORDER}
+    return layout.pick_region(rects, _boxes_out(clips, ws, W, H), list(taken))
 
 
 def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
@@ -660,7 +659,8 @@ def render_block(block: EditBlock, sources, tmp: Path, idx: int,
         cap_pos = block.caption_pos
         if cap_pos == AUTO_POS:             # 저작 기본 — 주인공이 비는 영역으로
             cap_pos = ("bottom" if block.zoom == "gradual"   # 줌은 투영이 안 맞음
-                       else _auto_pos(block.caption, clips, ws, size, avoid))
+                       else _auto_pos(block.caption, clips, ws, size, avoid)
+                       or "bottom")         # 전 영역 충돌(이론상) → 관행 기본
         bd = _probe_dur(str(vid))
         win = None
         if block.caption_span:              # [비율] → 실측 블록 길이 기준 초
@@ -699,22 +699,27 @@ def allowed_sources_per_block(plan: EditPlan, sources, ws: Workspace) -> list[li
 def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
                      size: tuple[int, int], ws: Workspace):
     """블록 걸침 카피(plan.texts) 번인 — 표시창은 *생존 블록*의 실측 경계로 계산
-    (블록 드롭 시 원 인덱스 기준), 자리는 주인공·title·블록 자막·먼저 놓인 카피를
-    피해 결정론으로. 가독성 미달은 경고 후 드롭(저작 예산 프롬프트의 회귀 신호).
+    (블록 드롭 시 원 인덱스 기준). 두 법칙(2026-07-06 사용자 확정)을 결정론 집행:
+    ①동시 표시 ≤ MAX_CONCURRENT(title 포함) — 카피는 보조라 틈(place_copy)에만
+    ②시간이 겹치는 텍스트끼리 같은·인접 영역 금지(ADJACENT). 틈·자리가 없으면
+    경고 후 드롭 — 저작 예산·구성 프롬프트의 회귀 신호.
 
     infos = [(원 블록 idx, block, clips, 실측 dur, 확정 자막 pos)] 렌더 순서.
     블록들은 cut concat 이라 경계 = 누적 실측 길이(산수, 누적오차 없음).
     """
-    W, H = size
     bounds, t = {}, 0.0                     # 원 idx → 최종 타임라인 (시작, 끝) 초
     for oi, _b, _c, d, _p in infos:
         bounds[oi] = (t, t + d); t += d
-    taken: list[tuple[tuple, tuple]] = []   # (rect, 표시창) — 시간 겹칠 때만 자리 충돌
+    placed: list[tuple[str, tuple]] = []    # (영역 이름, 표시창) — title·자막·카피
     if plan.title:
-        taken.append((_text_rect(plan.title, W, H, "top"), (0.0, t)))
+        placed.append(("top", (0.0, t)))
     for oi, b, _c, _d, cap_pos in infos:
         if b.caption and cap_pos:
-            taken.append((_text_rect(b.caption, W, H, cap_pos), bounds[oi]))
+            t0, t1 = bounds[oi]
+            if b.caption_span:              # 자막 실표시창(블록 내 비율 → 절대 초)
+                t0, t1 = (t0 + (t1 - t0) * b.caption_span[0],
+                          t0 + (t1 - t0) * b.caption_span[1])
+            placed.append((cap_pos, (t0, t1)))
     cur = src
     for k, tx in enumerate(plan.texts):
         sel = [(oi, c) for oi, _b, c, _d, _p in infos
@@ -723,20 +728,27 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
             print(f"  [카피] ⚠️ texts[{k}] 대상 블록 전멸 → 드롭: {tx.text[:20]!r}")
             continue
         w0, w1 = bounds[sel[0][0]][0], bounds[sel[-1][0]][1]
-        # span 미지정 카피는 읽을 만큼 보였다 사라진다(copy_window) — 상시는 title 몫.
-        win = layout.copy_window(w0, w1, tx.span, tx.text)
+        # 동시 상한을 지키는 틈에 배치 — span 미지정은 읽을 만큼 보였다 사라짐.
+        win = layout.place_copy(w0, w1, tx.span, tx.text, [w for _, w in placed])
         if win is None:
-            print(f"  [가독성] ⚠️ texts[{k}] {len(tx.text)}자를 {w1 - w0:.1f}s 창에 "
-                  f"못 읽음 → 드롭 — 저작 예산 프롬프트 점검 신호")
+            print(f"  [카피] ⚠️ texts[{k}] 동시 {layout.MAX_CONCURRENT}개 상한 안에서 "
+                  f"읽을 틈 없음({len(tx.text)}자, 범위 {w1 - w0:.1f}s) → 드롭: "
+                  f"{tx.text[:20]!r}")
             continue
         clips = [cl for _oi, c in sel for cl in c]
-        concurrent = [r for r, w in taken if min(w[1], win[1]) > max(w[0], win[0])]
+        concurrent = [p for p, w in placed if min(w[1], win[1]) > max(w[0], win[0])]
         pos = tx.pos
+        if pos != AUTO_POS and any(layout.conflicts(pos, c) for c in concurrent):
+            pos = AUTO_POS                  # 명시 자리가 인접 충돌 → 자동 재배치
         if pos == AUTO_POS:
             pos = _auto_pos(tx.text, clips, ws, size, taken=concurrent)
+        if pos is None:
+            print(f"  [카피] ⚠️ texts[{k}] 인접 충돌 없는 영역 없음 → 드롭: "
+                  f"{tx.text[:20]!r}")
+            continue
         nxt = src.with_name(f"{src.stem}_txt{k}.mp4")
         _overlay_text(cur, tx.text, nxt, size, pos=pos, window=win)
-        taken.append((_text_rect(tx.text, W, H, pos), win))
+        placed.append((pos, win))
         cur = nxt
         print(f"  [카피] texts[{k}] @{pos} {win[0]:.1f}~{win[1]:.1f}s: {tx.text!r}")
     Path(cur).replace(out)

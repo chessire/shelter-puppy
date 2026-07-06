@@ -179,14 +179,16 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         "아니면 none\n"
         "- caption: 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
         "문장으로 써라(요청문을 옮겨 적지 마라). 강아지 이름과 고객의 말투는 "
-        "따른다. 매 블록 반드시 채운다(빈 문자열 금지). 자막은 눈으로 읽는 "
-        f"글이다 — 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라"
+        "따른다. 매 블록 반드시 채운다(빈 문자열 금지) — 단 texts 카피가 그 "
+        "블록 구간을 덮으면 비워도 된다(화면의 글은 동시에 2개까지). 자막은 "
+        f"눈으로 읽는 글이다 — 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라"
         f"(예: 5초 블록 ≤ {BUDGET_CPS * 5:.0f}자). 길면 문장을 줄여라.\n"
         "- caption_pos: 기본 auto — 렌더러가 강아지를 가리지 않는 빈 자리를 "
         "자동으로 고른다(너는 화면을 못 보므로 auto 가 안전하다). 특별한 연출 "
         "의도가 있을 때만 8방위(bottom/top/left/right/top-left/top-right/"
         "bottom-left/bottom-right) 지정. 우상단(top-right)엔 AI 표시가 있고, "
-        "title 을 채웠으면 top 도 title 자리다 — 둘 다 쓰지 마라.\n"
+        "title 을 채웠으면 top 과 그 옆 구석도 title 자리다 — 쓰지 마라. 붙은 "
+        "자리(top 과 top-left 처럼 이웃)는 같은 시간에 함께 쓰지 마라.\n"
         "- caption_span: 자막이 장면에 맞춰 떴다 사라지게 하고 싶으면 블록 길이 "
         "대비 [시작,끝] 0~1 비율(예: [0.2,0.8]), 내내 표시면 생략\n"
         "- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
@@ -199,7 +201,9 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         f"최대 {MAX_TEXTS}개. 걸친 블록들의 길이 합 1초당 {BUDGET_CPS:.0f}자 이내. "
         "카피는 기본적으로 범위 시작에서 읽을 만큼만 보였다 *사라진다* — 내내 "
         "띄울 문구는 title 이지 카피가 아니다(꼭 내내면 span:[0,1] 명시). "
-        "동시에 떠 있는 글이 많으면 시청자가 못 읽는다 — 꼭 필요할 때만.\n"
+        "**화면에 동시에 보이는 글은 title 포함 2개까지** — 초과분은 렌더러가 "
+        "시간을 비켜 배치하거나 뺀다. 카피가 보일 자리를 원하면 그 블록의 "
+        "caption 을 비우거나 caption_span 으로 틈을 줘라.\n"
         "자막·내레이션이 소재의 관찰 기록과 어긋나지 않게 하라.")
     # 재시도 조건 = JSON 실패 + 구조 무효(블록 0개 또는 자막·대본 전무 — 텍스트 0인
     # 소개 영상은 창작 다양성이 아니라 결함, 실측: 전 블록 caption 빈 값 복권).
@@ -263,12 +267,14 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
                 t.blocks = [min(t.blocks[0], len(blocks) - 1),
                             min(t.blocks[1], len(blocks) - 1)]
                 texts.append(t)
-    # 상시 요소와의 충돌 소독 — top-right=AI 배지, top=title 자리(채웠을 때).
-    # 저작 위치 지정은 연출 재량이지만 상시 요소와의 겹침은 항상 결함(실측: title
-    # 채우고 블록0 자막 @top)이라 재량이 아니다 → auto 강등(빈 곳 자동이 대신 찾음).
+    # 상시 요소와의 충돌 소독 — top-right=AI 배지, title 채웠으면 top 은 title
+    # 자리이고 그 이웃 구석(top-left/top-right)도 인접 금지(ADJACENT — 붙은 자리는
+    # 번인이 겹치는 느낌, 2026-07-06 사용자). 저작 위치 지정은 연출 재량이지만
+    # 상시 요소와의 겹침은 항상 결함(실측: title 채우고 블록0 자막 @top)이라
+    # 재량이 아니다 → auto 강등(빈 곳 자동이 대신 찾음).
     for x in blocks + texts:
         pos = x.caption_pos if isinstance(x, EditBlock) else x.pos
-        if pos == "top-right" or (title and pos == "top"):
+        if pos == "top-right" or (title and pos in ("top", "top-left")):
             if isinstance(x, EditBlock):
                 x.caption_pos = AUTO_POS
             else:
