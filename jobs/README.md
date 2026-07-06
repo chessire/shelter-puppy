@@ -9,14 +9,14 @@
   input/        # 검증 통과 업로드 (≤10개, ≤N MB)
   analysis/     # P0 정규화 mp4 + map.json
   preds/        # M1 검출, M4 동작태그
-  cards/        # 임보견 후보 크롭(다견일 때 고객 제시)
+  cards/        # 강아지 후보 크롭(다견일 때 고객 제시)
   meta.json     # foster_track · scene_tags · 편집요청 · 검증결과 · state
   out/          # 렌더 결과
 ```
 
 ## 잡 라이프사이클 (Phase 2 구현됨 — `pipeline/job.py`)
 1. `init_job(id, inputs)`: 디렉토리 생성 + input/ 저장 + meta 초기화
-2. `prepare(ws)`: P0 정규화 + M1 검출 → 임보견 후보(단독견이면 자동확정)
+2. `prepare(ws)`: P0 정규화 + M1 검출 → 강아지 후보(단독견이면 자동확정)
 3. [다견이면 고객이 트랙 선택 → `meta.foster_track` 저장]  ← Phase 3(카드)
 4. `render(ws, request)`: M4 + M6 → out/
 
