@@ -257,3 +257,42 @@ def test_text_rect_regions_distinct():
     assert r_bottom[1] > H * 0.7 and r_top[3] < H * 0.5     # 상하 분리
     assert r_tl[0] < W * 0.3 and r_br[2] > W * 0.7          # 좌우 구석 분리
     assert layout.rect_overlap(r_bottom, r_top) == 0.0
+
+
+def test_style_hierarchy_sizes():
+    # 시각 위계: title > copy > caption (같은 텍스트의 rect 높이로 비교)
+    W, H = 1080, 1920
+    def h(style):
+        r = _text_rect("토리", W, H, "bottom", style)
+        return r[3] - r[1]
+    assert h("title") > h("copy") > h("caption")
+
+
+def test_pick_region_respects_blocked_rects():
+    rects = {p: ((0, 0, 10, 10) if p == "bottom" else (20, 20, 30, 30))
+             for p in layout.AUTO_ORDER}
+    # bottom 자리가 이름 없는 카피 rect 와 겹침 → 다음 후보로
+    pos = layout.pick_region(rects, [], blocked=[(5, 5, 15, 15)])
+    assert pos == "top"
+
+
+def test_beside_subject_picks_empty_side():
+    from pipeline.m6_edit.run import _beside_subject
+    W, H = 1080, 1920
+    # 주인공이 왼쪽에 → 오른쪽 여백에, 얼굴 높이로, 피사체 쪽(왼쪽) 정렬
+    boxes = [(100, 800, 400, 1200)] * 5
+    got = _beside_subject("심쿵 주의보!", boxes, W, H)
+    assert got is not None
+    block, rect = got
+    assert rect[0] > 400                                     # 박스 오른쪽
+    assert block[-1] == "left"                               # 줄 정렬 = 피사체 쪽
+    face_y = 800 + 0.35 * 400
+    assert rect[1] < face_y < rect[3]                        # 얼굴 높이에 걸침
+
+
+def test_beside_subject_none_when_no_room():
+    from pipeline.m6_edit.run import _beside_subject
+    W, H = 1080, 1920
+    boxes = [(50, 400, 1030, 1500)] * 3                      # 화면을 꽉 채운 주인공
+    assert _beside_subject("카피", boxes, W, H) is None
+    assert _beside_subject("카피", [], W, H) is None         # 박스 없음 → 폴백

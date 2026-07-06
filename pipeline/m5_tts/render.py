@@ -107,7 +107,7 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         total = sum(d for _, _, _, d, _, _, _ in seq)
         _overlay_text(stitched, plan.title, titled, size, pos="top",
                       window=(layout.title_window(plan.title, total)
-                              if plan.title else None))
+                              if plan.title else None), style="title")
         if plan.texts:
             texted = tmp / "texted.mp4"
             _burn_plan_texts(titled, plan,

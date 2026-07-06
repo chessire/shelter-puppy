@@ -492,30 +492,85 @@ def _block_origin(pos: str, W: int, H: int, block_w: float, block_h: float,
     return x0, cy - block_h / 2, "center"
 
 
-def _text_block(text: str, W: int, H: int, pos: str):
-    """텍스트 블록 기하(개행·크기·원점) — 그리기(_title_png)와 자리 판단(_text_rect)의
-    단일 출처(이중 출처 금지). 반환 (font, lines, widths, lh, gap, x0, y0, bw, bh, align)."""
+# 텍스트 시각 위계(2026-07-06 사용자 "심혈" 피드백) — 전부 같은 폰트+검은 박스는
+# 자막 엔진의 문법이지 디자인이 아니다. 역할별 스타일(기하·시각 상수, 내용 아님):
+#   caption = 서사 자막(일관성이 미덕 — 박스+기본 크기, 기존 룩 유지)
+#   copy    = 펀치 카피(스티커 룩 — 박스 없이 굵은 외곽선, 더 크게)
+#   title   = 문패(가장 크게, 외곽선)
+_TEXT_STYLES = {
+    "caption": {"div": 18, "box": True},
+    "copy":    {"div": 13, "box": False},
+    "title":   {"div": 11, "box": False},
+}
+
+
+def _font_and_measure(W: int, style: str):
     from PIL import Image, ImageDraw, ImageFont
-    if pos not in TEXT_POSITIONS:
-        pos = "bottom"
-    font = ImageFont.truetype(_KFONT, max(28, W // 18))
+    size = max(28, W // _TEXT_STYLES[style]["div"])
+    font = ImageFont.truetype(_KFONT, size)
     meas = ImageDraw.Draw(Image.new("RGBA", (1, 1)))   # 측정만 — 캔버스 불필요
-    max_w = int(W * (0.40 if "-" in pos or pos in ("left", "right") else 0.86))
+    return font, meas, size
+
+
+def _layout_lines(text: str, font, meas, max_w: float):
+    """개행·크기 측정 — 반환 (lines, widths, lh, gap, bw, bh)."""
     lines = _wrap_lines(text, font, meas.textlength, max_w)
     ascent, descent = font.getmetrics()
     lh = ascent + descent
     gap = lh // 4
     widths = [meas.textlength(ln, font=font) for ln in lines]
-    block_w = max(widths)
-    block_h = len(lines) * lh + (len(lines) - 1) * gap
+    return lines, widths, lh, gap, max(widths), len(lines) * lh + (len(lines) - 1) * gap
+
+
+def _text_block(text: str, W: int, H: int, pos: str, style: str = "caption"):
+    """텍스트 블록 기하(개행·크기·원점) — 그리기(_text_png)와 자리 판단(_text_rect)의
+    단일 출처(이중 출처 금지). 반환 (font, lines, widths, lh, gap, x0, y0, bw, bh, align)."""
+    if pos not in TEXT_POSITIONS:
+        pos = "bottom"
+    font, meas, _ = _font_and_measure(W, style)
+    max_w = int(W * (0.40 if "-" in pos or pos in ("left", "right") else 0.86))
+    lines, widths, lh, gap, block_w, block_h = _layout_lines(text, font, meas, max_w)
     x0, y0, align = _block_origin(pos, W, H, block_w, block_h, lh)
     return font, lines, widths, lh, gap, x0, y0, block_w, block_h, align
 
 
-def _text_rect(text: str, W: int, H: int, pos: str) -> tuple:
-    """이 텍스트가 pos 영역에서 차지할 배경 박스 rect(패딩 포함) — 배치 판단용."""
-    _, _, _, _, _, x0, y0, bw, bh, _ = _text_block(text, W, H, pos)
+def _text_rect(text: str, W: int, H: int, pos: str, style: str = "caption") -> tuple:
+    """이 텍스트가 pos 영역에서 차지할 rect(패딩 포함) — 배치 판단용."""
+    _, _, _, _, _, x0, y0, bw, bh, _ = _text_block(text, W, H, pos, style)
     return (x0 - 18, y0 - 14, x0 + bw + 18, y0 + bh + 18)
+
+
+def _beside_subject(text: str, boxes: list[tuple], W: int, H: int):
+    """피사체 옆 카피 배치 — 박스 중앙값의 '얼굴 높이, 빈 쪽 옆'에 한 번 고정.
+
+    편집자 관행의 재현(2026-07-06 사용자 "심혈" 피드백): 카피는 화면 구석(회피)이
+    아니라 피사체와 관계 맺는 자리에 선다. 줌과 같은 원칙 — 추적하지 않고 시작
+    구도(중앙값)로 고정. 반환 (draw_block, rect) 또는 None(여백 부족 → 영역 폴백).
+    """
+    if not boxes:
+        return None
+    import statistics as st
+    bx1 = st.median(b[0] for b in boxes); bx2 = st.median(b[2] for b in boxes)
+    by1 = st.median(b[1] for b in boxes); by2 = st.median(b[3] for b in boxes)
+    face_y = by1 + 0.35 * (by2 - by1)          # 얼굴 ≈ 박스 상단 35%(줌과 동일)
+    font, meas, size = _font_and_measure(W, "copy")
+    margin, edge = W * 0.03, 24
+    sides = sorted([("right", W - bx2 - margin - edge), ("left", bx1 - margin - edge)],
+                   key=lambda s: s[1], reverse=True)
+    for side, room in sides:
+        if room < W * 0.20:                    # 몸 붙일 여백이 없다
+            continue
+        lines, widths, lh, gap, bw, bh = _layout_lines(
+            text, font, meas, min(W * 0.38, room))
+        if bw > room:
+            continue
+        x0 = (bx2 + margin) if side == "right" else (bx1 - margin - bw)
+        y0 = min(max(face_y - bh / 2, H * 0.12), H * 0.88 - bh)
+        align = "left" if side == "right" else "right"   # 줄이 피사체 쪽으로 정렬
+        pad = size // 8 + 6
+        rect = (x0 - pad, y0 - pad, x0 + bw + pad, y0 + bh + pad)
+        return (font, lines, widths, lh, gap, x0, y0, bw, bh, align), rect
+    return None
 
 
 def _boxes_out(clips: list[tuple[str, float, float]], ws: Workspace,
@@ -545,36 +600,43 @@ def _boxes_out(clips: list[tuple[str, float, float]], ws: Workspace,
 
 
 def _auto_pos(text: str, clips, ws: Workspace, size: tuple[int, int],
-              taken: tuple = ()) -> str | None:
+              taken: tuple = (), style: str = "caption",
+              blocked: tuple = ()) -> str | None:
     """auto 위치 확정 — 주인공 박스가 비는 8방위 선택(layout.pick_region).
 
     위치는 구도의 사실이라 픽셀만 안다 — 저작은 auto 로 넘기고 여기서 결정론으로.
-    taken = 같은 시간에 보이는 텍스트들의 영역 이름(같음·인접 충돌 제외, ADJACENT).
+    taken = 같은 시간에 보이는 텍스트들의 영역 이름(같음·인접 충돌 제외, ADJACENT),
+    blocked = 이름 없는 동시 텍스트(피사체 옆 카피)의 rect 들.
     """
     W, H = size
-    rects = {p: _text_rect(text, W, H, p) for p in layout.AUTO_ORDER}
-    return layout.pick_region(rects, _boxes_out(clips, ws, W, H), list(taken))
+    rects = {p: _text_rect(text, W, H, p, style) for p in layout.AUTO_ORDER}
+    return layout.pick_region(rects, _boxes_out(clips, ws, W, H), list(taken),
+                              blocked=list(blocked))
 
 
-def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
-    """텍스트 PNG — 8방위 영역, 자동 개행.
+def _text_png(text: str, W: int, H: int, out: Path, pos: str = "bottom",
+              style: str = "caption", block=None):
+    """텍스트 PNG — 8방위 영역 또는 임의 원점(block=피사체 옆 배치의 측정 결과).
 
-    4방위(top/bottom/left/right) = 중심 고정, 여러 줄이면 상하·좌우 대칭 성장.
-    네 구석 = 모서리 정렬(왼쪽 구석 왼쪽 정렬·오른쪽 구석 오른쪽 정렬), 안쪽으로 성장.
-    상/하 중앙 행은 화면 폭 86%, 좌/우·구석은 40%로 개행해 영역감 유지.
+    caption = 검은 반투명 박스 + 흰 글자(자막 룩), copy/title = 박스 없이 굵은
+    검은 외곽선(스티커/문패 룩) — 역할별 시각 위계(_TEXT_STYLES).
     """
     from PIL import Image, ImageDraw
     font, lines, widths, lh, gap, x0, y0, block_w, block_h, align = \
-        _text_block(text, W, H, pos)
+        block or _text_block(text, W, H, pos, style)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rectangle([x0 - 18, y0 - 14, x0 + block_w + 18, y0 + block_h + 18],
-                fill=(0, 0, 0, 150))
+    boxed = _TEXT_STYLES[style]["box"]
+    if boxed:
+        d.rectangle([x0 - 18, y0 - 14, x0 + block_w + 18, y0 + block_h + 18],
+                    fill=(0, 0, 0, 150))
+    sw = 0 if boxed else max(2, font.size // 14)
     for i, ln in enumerate(lines):
         lx = (x0 if align == "left"
               else x0 + block_w - widths[i] if align == "right"
               else x0 + (block_w - widths[i]) / 2)
-        d.text((lx, y0 + i * (lh + gap)), ln, font=font, fill=(255, 255, 255, 255))
+        d.text((lx, y0 + i * (lh + gap)), ln, font=font, fill=(255, 255, 255, 255),
+               stroke_width=sw, stroke_fill=(0, 0, 0, 230))
     img.save(out)
 
 
@@ -608,20 +670,38 @@ def _apply_speed(src: Path, speed: float, out: Path):
                     str(out)], check=True, capture_output=True)
 
 
+_FADE_DUR = 0.25   # 텍스트 등장/퇴장 페이드(초) — 하드 온/오프는 기계적(심혈 피드백)
+
+
 def _overlay_text(src: Path, text: str, out: Path, size: tuple[int, int],
-                  pos: str = "bottom", window: tuple[float, float] | None = None):
+                  pos: str = "bottom", window: tuple[float, float] | None = None,
+                  style: str = "caption", block=None):
     """src 영상에 한글 텍스트(PIL→overlay) 박아 out 으로. 빈 텍스트면 그대로 복사.
 
-    window=(t0,t1)초 — 그 구간에만 표시(자막이 생기고 사라지는 타이밍, caption_span).
+    window=(t0,t1)초 — 그 구간에만 표시 + 양끝 알파 페이드(_FADE_DUR, 짧은 창은
+    창/4 로 축소). window=None 이면 영상 전체(양끝 페이드는 동일 적용).
+    style/block — 시각 위계·피사체 옆 배치(_text_png 로 전달).
     """
     if not text:
         src.replace(out); return
     png = out.with_name(out.stem + "_txt.png")
-    _title_png(text, size[0], size[1], png, pos=pos)
-    ov = "[0:v][1:v]overlay=0:0"
-    if window is not None:
-        ov += f":enable='between(t,{window[0]:.2f},{window[1]:.2f})'"
-    subprocess.run(["ffmpeg", "-y", "-i", str(src), "-i", str(png),
+    _text_png(text, size[0], size[1], png, pos=pos, style=style, block=block)
+    if window is None:
+        window = (0.0, max(_probe_dur(str(src)), 0.0))
+    w0, w1 = window
+    f = min(_FADE_DUR, max(0.0, (w1 - w0) / 4))
+    fade = (f"fade=t=in:st={w0:.2f}:d={f:.2f}:alpha=1,"
+            f"fade=t=out:st={max(w0, w1 - f):.2f}:d={f:.2f}:alpha=1," if f >= 0.05
+            else "")
+    # ⚠️ 루프 이미지 입력은 반드시 -t 로 유한하게(창 끝 +0.5s) — 무한 스트림이면
+    # ffmpeg 가 영원히 안 끝난다(-shortest 는 출력 스트림이 하나라 무의미, 실측:
+    # 밤새 9시간 행 + rerender 지연 2026-07-07). 이미지 EOF 후엔 eof_action=pass 로
+    # 원본이 그대로 흐른다.
+    ov = (f"[1:v]format=rgba,{fade}setpts=PTS[txt];"
+          f"[0:v][txt]overlay=0:0:eof_action=pass"
+          f":enable='between(t,{w0:.2f},{w1:.2f})'")
+    subprocess.run(["ffmpeg", "-y", "-i", str(src),
+                    "-loop", "1", "-t", f"{w1 + 0.5:.2f}", "-i", str(png),
                     "-filter_complex", ov, "-c:v", "libx264",
                     "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)],
                    check=True, capture_output=True)
@@ -662,12 +742,12 @@ def render_block(block: EditBlock, sources, tmp: Path, idx: int,
                        else _auto_pos(block.caption, clips, ws, size, avoid)
                        or "bottom")         # 전 영역 충돌(이론상) → 관행 기본
         bd = _probe_dur(str(vid))
-        win = None
+        win = (0.0, bd)                     # 창 명시 = 양끝 페이드 기준
         if block.caption_span:              # [비율] → 실측 블록 길이 기준 초
             win = (block.caption_span[0] * bd, block.caption_span[1] * bd)
         # 가독성 안전망(경고만) — 예산은 저작 프롬프트가 앞단에서 유도. 자주 발동하면
         # 프롬프트 회귀 신호(_watch_echo 결). 블록 자막은 유저 소유일 수 있어 안 지운다.
-        shown = (win[1] - win[0]) if win else bd
+        shown = win[1] - win[0]
         req = layout.required_secs(block.caption)
         if 0 < shown < req:
             print(f"  [가독성] ⚠️ 블록{idx} 자막 {len(block.caption)}자/{shown:.1f}s "
@@ -707,50 +787,75 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
     infos = [(원 블록 idx, block, clips, 실측 dur, 확정 자막 pos)] 렌더 순서.
     블록들은 cut concat 이라 경계 = 누적 실측 길이(산수, 누적오차 없음).
     """
+    W, H = size
     bounds, t = {}, 0.0                     # 원 idx → 최종 타임라인 (시작, 끝) 초
     for oi, _b, _c, d, _p in infos:
         bounds[oi] = (t, t + d); t += d
-    placed: list[tuple[str, tuple]] = []    # (영역 이름, 표시창) — title·자막·카피
+    # (영역 이름|None, rect, 표시창) — 이름=8방위(인접 법칙), None=피사체 옆(rect 로만)
+    placed: list[tuple] = []
     if plan.title:                          # title 도 소멸 — 떠나면 슬롯·top 이 풀린다
-        placed.append(("top", layout.title_window(plan.title, t)))
+        placed.append(("top", _text_rect(plan.title, W, H, "top", "title"),
+                       layout.title_window(plan.title, t)))
     for oi, b, _c, _d, cap_pos in infos:
         if b.caption and cap_pos:
             t0, t1 = bounds[oi]
             if b.caption_span:              # 자막 실표시창(블록 내 비율 → 절대 초)
                 t0, t1 = (t0 + (t1 - t0) * b.caption_span[0],
                           t0 + (t1 - t0) * b.caption_span[1])
-            placed.append((cap_pos, (t0, t1)))
+            placed.append((cap_pos, _text_rect(b.caption, W, H, cap_pos), (t0, t1)))
     cur = src
     for k, tx in enumerate(plan.texts):
-        sel = [(oi, c) for oi, _b, c, _d, _p in infos
+        sel = [(oi, b, c) for oi, b, c, _d, _p in infos
                if tx.blocks[0] <= oi <= tx.blocks[1]]
         if not sel:
             print(f"  [카피] ⚠️ texts[{k}] 대상 블록 전멸 → 드롭: {tx.text[:20]!r}")
             continue
         w0, w1 = bounds[sel[0][0]][0], bounds[sel[-1][0]][1]
         # 동시 상한을 지키는 틈에 배치 — span 미지정은 읽을 만큼 보였다 사라짐.
-        win = layout.place_copy(w0, w1, tx.span, tx.text, [w for _, w in placed])
+        win = layout.place_copy(w0, w1, tx.span, tx.text, [w for _, _, w in placed])
         if win is None:
             print(f"  [카피] ⚠️ texts[{k}] 동시 {layout.MAX_CONCURRENT}개 상한 안에서 "
                   f"읽을 틈 없음({len(tx.text)}자, 범위 {w1 - w0:.1f}s) → 드롭: "
                   f"{tx.text[:20]!r}")
             continue
-        clips = [cl for _oi, c in sel for cl in c]
-        concurrent = [p for p, w in placed if min(w[1], win[1]) > max(w[0], win[0])]
-        pos = tx.pos
-        if pos != AUTO_POS and any(layout.conflicts(pos, c) for c in concurrent):
-            pos = AUTO_POS                  # 명시 자리가 인접 충돌 → 자동 재배치
+        conc = [(n, r) for n, r, w in placed if min(w[1], win[1]) > max(w[0], win[0])]
+        conc_names = [n for n, _ in conc if n]
+        conc_rects = [r for _, r in conc]
+        # 구도 기준 = 카피가 *뜨는 순간*의 블록(줌 블록은 투영 불일치라 제외)
+        ob, oclips = next(((b, c) for oi, b, c in sel
+                           if bounds[oi][0] <= win[0] < bounds[oi][1] + 1e-6),
+                          (sel[0][1], sel[0][2]))
+        boxes = [] if ob.zoom == "gradual" else _boxes_out(oclips, ws, W, H)
+        pos, draw_block, rect = tx.pos, None, None
+        if pos != AUTO_POS:                 # 저작 명시 자리 — 충돌 없을 때만 존중
+            rect = _text_rect(tx.text, W, H, pos, "copy")
+            if (any(layout.conflicts(pos, n) for n in conc_names)
+                    or any(layout.rect_overlap(rect, r) > 0 for r in conc_rects)):
+                pos = AUTO_POS
         if pos == AUTO_POS:
-            pos = _auto_pos(tx.text, clips, ws, size, taken=concurrent)
-        if pos is None:
-            print(f"  [카피] ⚠️ texts[{k}] 인접 충돌 없는 영역 없음 → 드롭: "
-                  f"{tx.text[:20]!r}")
-            continue
+            # ① 피사체 옆(편집자 관행) → ② 빈 영역 폴백 → ③ 자리 없으면 드롭
+            beside = _beside_subject(tx.text, boxes, W, H)
+            if (beside and layout.occupancy(beside[1], boxes) <= layout.OCC_MAX
+                    and not any(layout.rect_overlap(beside[1], r) > 0
+                                for r in conc_rects)):
+                draw_block, rect, pos = beside[0], beside[1], None
+            else:
+                clips_all = [cl for _oi, b2, c in sel
+                             if b2.zoom != "gradual" for cl in c]
+                pos = _auto_pos(tx.text, clips_all, ws, size, taken=conc_names,
+                                style="copy", blocked=conc_rects)
+                if pos is None:
+                    print(f"  [카피] ⚠️ texts[{k}] 충돌 없는 자리 없음 → 드롭: "
+                          f"{tx.text[:20]!r}")
+                    continue
+                rect = _text_rect(tx.text, W, H, pos, "copy")
         nxt = src.with_name(f"{src.stem}_txt{k}.mp4")
-        _overlay_text(cur, tx.text, nxt, size, pos=pos, window=win)
-        placed.append((pos, win))
+        _overlay_text(cur, tx.text, nxt, size, pos=(pos or "bottom"), window=win,
+                      style="copy", block=draw_block)
+        placed.append((pos, rect, win))
         cur = nxt
-        print(f"  [카피] texts[{k}] @{pos} {win[0]:.1f}~{win[1]:.1f}s: {tx.text!r}")
+        print(f"  [카피] texts[{k}] @{pos or '피사체 옆'} "
+              f"{win[0]:.1f}~{win[1]:.1f}s: {tx.text!r}")
     Path(cur).replace(out)
 
 
@@ -782,11 +887,12 @@ def render_plan(plan: EditPlan, sources, out_path: str, size=(768, 432), fps=30.
                 if plan.title else None)
         if plan.texts:
             titled = tmp / "titled.mp4"
-            _overlay_text(stitched_all, plan.title, titled, size, pos="top", window=twin)
+            _overlay_text(stitched_all, plan.title, titled, size, pos="top",
+                          window=twin, style="title")
             _burn_plan_texts(titled, plan, infos, Path(out_path), size, ws)
         else:
             _overlay_text(stitched_all, plan.title, Path(out_path), size, pos="top",
-                          window=twin)
+                          window=twin, style="title")
 
 
 def _probe_dur(path: str) -> float:

@@ -54,14 +54,15 @@ def occupancy(rect: tuple, boxes: list[tuple]) -> float:
 
 def pick_region(rects: dict[str, tuple], boxes: list[tuple],
                 taken: list = (), order: tuple = AUTO_ORDER,
-                thresh: float = OCC_MAX) -> str | None:
+                thresh: float = OCC_MAX, blocked: list = ()) -> str | None:
     """빈 영역 선택 — 후보 순서대로 ①같은 시간에 보이는 텍스트(taken, 영역 이름들)와
-    같거나 인접(ADJACENT)하지 않고 ②주인공 겹침 ≤ thresh 인 첫 영역. 겹침만 남으면
-    최소 겹침 영역, 인접까지 전부 막히면 None(호출부가 드롭/폴백 — 붙은 자리에
-    구겨 넣는 건 이 함수의 권한이 아니다).
+    같거나 인접(ADJACENT)하지 않고 ②이름 없는 동시 텍스트 rect(blocked, 피사체 옆
+    카피)와 무겹침 ③주인공 겹침 ≤ thresh 인 첫 영역. 겹침만 남으면 최소 겹침 영역,
+    전부 막히면 None(호출부가 드롭/폴백 — 붙은 자리에 구겨 넣지 않는다).
     """
     cands = [p for p in order if p in rects
-             and not any(conflicts(p, t) for t in taken)]
+             and not any(conflicts(p, t) for t in taken)
+             and not any(rect_overlap(rects[p], r) > 0 for r in blocked)]
     for pos in cands:
         if occupancy(rects[pos], boxes) <= thresh:
             return pos
