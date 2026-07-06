@@ -711,8 +711,8 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
     for oi, _b, _c, d, _p in infos:
         bounds[oi] = (t, t + d); t += d
     placed: list[tuple[str, tuple]] = []    # (영역 이름, 표시창) — title·자막·카피
-    if plan.title:
-        placed.append(("top", (0.0, t)))
+    if plan.title:                          # title 도 소멸 — 떠나면 슬롯·top 이 풀린다
+        placed.append(("top", layout.title_window(plan.title, t)))
     for oi, b, _c, _d, cap_pos in infos:
         if b.caption and cap_pos:
             t0, t1 = bounds[oi]
@@ -777,12 +777,16 @@ def render_plan(plan: EditPlan, sources, out_path: str, size=(768, 432), fps=30.
             raise SystemExit("선택된 클립이 없음 (어떤 블록도 조건에 맞는 구간 없음).")
         stitched_all = tmp / "all.mp4"
         _stitch([b for b, _ in block_vids], [d for _, d in block_vids], "cut", stitched_all)
+        # title 도 카피처럼 소멸(2026-07-06 사용자) — 표시창은 layout.title_window.
+        twin = (layout.title_window(plan.title, sum(d for _, d in block_vids))
+                if plan.title else None)
         if plan.texts:
             titled = tmp / "titled.mp4"
-            _overlay_text(stitched_all, plan.title, titled, size, pos="top")
+            _overlay_text(stitched_all, plan.title, titled, size, pos="top", window=twin)
             _burn_plan_texts(titled, plan, infos, Path(out_path), size, ws)
         else:
-            _overlay_text(stitched_all, plan.title, Path(out_path), size, pos="top")
+            _overlay_text(stitched_all, plan.title, Path(out_path), size, pos="top",
+                          window=twin)
 
 
 def _probe_dur(path: str) -> float:

@@ -27,7 +27,7 @@ from . import DEFAULT_PAUSE, DEFAULT_VOICE, VOICES
 from .assemble import _read_wav, _write_wav, synth_phrases
 from .engine import QwenSubprocessEngine
 from .interpret import decide_mode, interpret_narration
-from ..m6_edit import EditPlan
+from ..m6_edit import EditPlan, layout
 from ..m6_edit.badge import apply_badge
 from ..m6_edit.run import (_apply_speed, _burn_plan_texts, _overlay_text,
                            _probe_dur, _stitch, allowed_sources_per_block,
@@ -104,7 +104,10 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         _stitch([v for _, _, v, _, _, _, _ in seq],
                 [d for _, _, _, d, _, _, _ in seq], "cut", stitched)
         titled = tmp / "titled.mp4"
-        _overlay_text(stitched, plan.title, titled, size, pos="top")
+        total = sum(d for _, _, _, d, _, _, _ in seq)
+        _overlay_text(stitched, plan.title, titled, size, pos="top",
+                      window=(layout.title_window(plan.title, total)
+                              if plan.title else None))
         if plan.texts:
             texted = tmp / "texted.mp4"
             _burn_plan_texts(titled, plan,

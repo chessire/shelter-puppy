@@ -135,6 +135,22 @@ def test_place_copy_explicit_span_clipped_to_gap():
     assert win is not None and abs(win[0] - 4.0) < 1e-9 and abs(win[1] - 8.0) < 1e-9
 
 
+def test_title_window_dwell_and_cap():
+    # title 도 소멸(2026-07-06 사용자) — 짧은 title 은 하한 1.5s × TITLE_DWELL_FACTOR
+    w = layout.title_window("토리", 21.0)
+    assert w == (0.0, layout.TEXT_MIN_SHOW * layout.TITLE_DWELL_FACTOR)
+    assert layout.title_window("토리", 3.0) == (0.0, 3.0)   # 영상보다 길면 전체
+
+
+def test_title_departure_frees_copy_slot():
+    # title(0~4.5s) + 상시 자막(블록마다) 상황 — title 이 떠난 뒤 자막 1개뿐인
+    # 구간이 생기고, 카피는 거기 들어간다(자막 span 없이도 카피가 사는 이유).
+    title_w = layout.title_window("토리", 10.0)
+    windows = [title_w, (0.0, 5.0), (5.0, 10.0)]    # title + 블록0·1 자막(상시)
+    win = layout.place_copy(0.0, 10.0, None, "심쿵 주의보!", windows)
+    assert win is not None and abs(win[0] - title_w[1]) < 1e-9
+
+
 # ── PlanText 소독 ──────────────────────────────────────────────────────────
 
 def test_plantext_from_dict_sanitizes():

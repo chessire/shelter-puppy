@@ -84,6 +84,21 @@ DWELL_FACTOR = 2.0
 # 동시 표시 상한(title 포함) — "한번에 세 개 이상은 안 되겠다"(2026-07-06 사용자 확정).
 MAX_CONCURRENT = 2
 
+# title 체류 배수 — title 도 상시가 아니라 소멸(2026-07-06 사용자 확정). 카피(2.0)보다
+# 눈에 띄게 길게: title 은 문패라 위계가 높고, 인트로에선 자막을 먼저 읽고 title 로
+# 눈이 온다. 짧은 title 은 하한 1.5s 에 걸려 배수가 곧 체류 시간(3.0 = 4.5초 ≈ 쇼츠
+# 훅 구간). 2.5 vs 3.0 은 취향 축 — 이 상수 하나로 보정. [잠정]
+TITLE_DWELL_FACTOR = 3.0
+
+
+def title_window(title: str, total: float) -> tuple[float, float]:
+    """title 표시창 — 시작부터 읽기 시간 × TITLE_DWELL_FACTOR (영상보다 길면 전체).
+
+    렌더(overlay enable)와 동시성 장부(placed)가 같은 창을 봐야 하므로 단일 출처.
+    title 이 떠난 뒤에는 동시 슬롯(MAX_CONCURRENT)과 top 인접 영역이 풀린다.
+    """
+    return (0.0, min(total, required_secs(title) * TITLE_DWELL_FACTOR))
+
 # 인접 영역 — 4방위와 그 이웃 구석을 *같은 시간에* 함께 쓰면 번인이 겹치는 느낌
 # (2026-07-06 사용자: 상단+좌·우상단, 하단+좌·우하단, 좌단+좌상·좌하단, 우단+우상·우하단).
 # 시간이 겹치는 텍스트끼리만 적용 — 순차 표시는 같은 영역도 재사용 가능.
