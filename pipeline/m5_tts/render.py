@@ -29,8 +29,9 @@ from .engine import QwenSubprocessEngine
 from .interpret import decide_mode, interpret_narration
 from ..m6_edit import EditPlan
 from ..m6_edit.badge import apply_badge
-from ..m6_edit.run import (_apply_speed, _overlay_text, _probe_dur, _stitch,
-                           allowed_sources_per_block, render_block)
+from ..m6_edit.run import (_apply_speed, _burn_plan_texts, _overlay_text,
+                           _probe_dur, _stitch, allowed_sources_per_block,
+                           render_block)
 from ..workspace import Workspace
 
 _MIN_TAIL = 0.15   # 구절 끝과 컷 사이 최소 숨(초) — 이보다 짧으면 영상을 늘린다
@@ -68,17 +69,19 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         return len(data) / sr
 
     allowed = allowed_sources_per_block(plan, sources, ws)   # 핀 소스 예약(선점 방지)
+    avoid = ("top",) if plan.title else ()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         used: set = set()
-        seq: list[tuple[Path, float, dict | None]] = []   # (영상, 실측길이, 구절row)
+        # (원 블록 idx, block, 영상, 실측길이, clips, 확정 자막 pos, 구절row)
+        seq: list[tuple] = []
         for idx, block in enumerate(plan.blocks):
             row = row_by_block.get(idx)
             if row is not None:
                 need = _phrase_sec(row) + DEFAULT_PAUSE
                 block.target_dur = max(block.target_dur or 0.0, need)
-            vid, clips = render_block(block, allowed[idx], tmp, idx, size, fps,
-                                      exclude=used, ws=ws)
+            vid, clips, cap_pos = render_block(block, allowed[idx], tmp, idx, size,
+                                               fps, exclude=used, ws=ws, avoid=avoid)
             if vid is None:                    # 조건 맞는 클립 없음 → 블록·구절 함께 드롭
                 print(f"  [경고] 블록{idx} 클립 없음 → 구절과 함께 제외: "
                       f"{block.narration[:30]!r}")
@@ -92,19 +95,26 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
                     stretched = tmp / f"b{idx}_stretch.mp4"
                     _apply_speed(vid, vd / target, stretched)
                     vid, vd = stretched, _probe_dur(str(stretched))
-            seq.append((vid, vd, row))
+            seq.append((idx, block, vid, vd, clips, cap_pos, row))
         if not seq:
             raise SystemExit("선택된 클립이 없음 (어떤 블록도 조건에 맞는 구간 없음).")
 
-        # 2) 영상 concat + 전역 title
+        # 2) 영상 concat + 전역 title + 블록 걸침 카피(모드 B 와 같은 결정론 경로)
         stitched = tmp / "all.mp4"
-        _stitch([v for v, _, _ in seq], [d for _, d, _ in seq], "cut", stitched)
+        _stitch([v for _, _, v, _, _, _, _ in seq],
+                [d for _, _, _, d, _, _, _ in seq], "cut", stitched)
         titled = tmp / "titled.mp4"
         _overlay_text(stitched, plan.title, titled, size, pos="top")
+        if plan.texts:
+            texted = tmp / "texted.mp4"
+            _burn_plan_texts(titled, plan,
+                             [(oi, b, c, d, cp) for oi, b, _v, d, c, cp, _r in seq],
+                             texted, size, ws)
+            titled = texted
 
         # 3) 오디오 트랙 — 실측 블록 길이 기준 산수 (경계 누적오차 없음)
         chunks, timeline, t = [], [], 0.0
-        for vid, vd, row in seq:
+        for _oi, _b, vid, vd, _c, _cp, row in seq:
             if row is None:
                 chunks.append(np.zeros(int(vd * _TTS_SR), dtype=np.int16))
             else:

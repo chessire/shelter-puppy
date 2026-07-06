@@ -24,7 +24,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import TEXT_POSITIONS, EditBlock, EditPlan, PLAN_SCHEMA
+from . import AUTO_POS, TEXT_POSITIONS, EditBlock, EditPlan, PLAN_SCHEMA
+from . import layout
 from ..harness import io
 from ..m4_action import foster_track, is_trick
 from ..m4_action.gt_scaffold import foster_boxes as _foster_boxes_provider
@@ -491,6 +492,71 @@ def _block_origin(pos: str, W: int, H: int, block_w: float, block_h: float,
     return x0, cy - block_h / 2, "center"
 
 
+def _text_block(text: str, W: int, H: int, pos: str):
+    """텍스트 블록 기하(개행·크기·원점) — 그리기(_title_png)와 자리 판단(_text_rect)의
+    단일 출처(이중 출처 금지). 반환 (font, lines, widths, lh, gap, x0, y0, bw, bh, align)."""
+    from PIL import Image, ImageDraw, ImageFont
+    if pos not in TEXT_POSITIONS:
+        pos = "bottom"
+    font = ImageFont.truetype(_KFONT, max(28, W // 18))
+    meas = ImageDraw.Draw(Image.new("RGBA", (1, 1)))   # 측정만 — 캔버스 불필요
+    max_w = int(W * (0.40 if "-" in pos or pos in ("left", "right") else 0.86))
+    lines = _wrap_lines(text, font, meas.textlength, max_w)
+    ascent, descent = font.getmetrics()
+    lh = ascent + descent
+    gap = lh // 4
+    widths = [meas.textlength(ln, font=font) for ln in lines]
+    block_w = max(widths)
+    block_h = len(lines) * lh + (len(lines) - 1) * gap
+    x0, y0, align = _block_origin(pos, W, H, block_w, block_h, lh)
+    return font, lines, widths, lh, gap, x0, y0, block_w, block_h, align
+
+
+def _text_rect(text: str, W: int, H: int, pos: str) -> tuple:
+    """이 텍스트가 pos 영역에서 차지할 배경 박스 rect(패딩 포함) — 배치 판단용."""
+    _, _, _, _, _, x0, y0, bw, bh, _ = _text_block(text, W, H, pos)
+    return (x0 - 18, y0 - 14, x0 + bw + 18, y0 + bh + 18)
+
+
+def _boxes_out(clips: list[tuple[str, float, float]], ws: Workspace,
+               W: int, H: int) -> list[tuple]:
+    """클립들의 주인공 박스를 출력 캔버스 좌표로 투영(프레임별 rect 리스트).
+
+    stage2(_normalize_fill)의 fg 배치(비율유지 decrease + 중앙)와 같은 산수 —
+    분석 박스 × scale(원본 복원) × s(캔버스 fit) + 중앙 오프셋. "빈 곳"은 이
+    박스들의 여집합이다(검출은 M1+M2 가 이미 해놨다 — 여기는 산수만).
+    ⚠️ 줌 블록은 프레임마다 변환이 달라 이 투영이 안 맞는다 — 호출부가 건너뛴다.
+    """
+    out = []
+    for mp4, t0, t1 in clips:
+        name = Path(mp4).stem
+        boxes = _foster_boxes(name, ws)
+        if not boxes:
+            continue                        # 박스 없음 = 제약 없음(안전한 저하)
+        _, scale, ow, oh = _src_map(name, ws)
+        s = min(W / ow, H / oh)
+        ox, oy = (W - ow * s) / 2, (H - oh * s) / 2
+        for i in range(int(t0 * _ANALYSIS_FPS), int(t1 * _ANALYSIS_FPS) + 1):
+            b = boxes.get(i)
+            if b is not None:
+                out.append((b.x * scale * s + ox, b.y * scale * s + oy,
+                            b.x2 * scale * s + ox, b.y2 * scale * s + oy))
+    return out
+
+
+def _auto_pos(text: str, clips, ws: Workspace, size: tuple[int, int],
+              avoid: tuple = (), taken: list = ()) -> str:
+    """auto 위치 확정 — 주인공 박스가 비는 8방위 선택(layout.pick_region).
+
+    위치는 구도의 사실이라 픽셀만 안다 — 저작은 auto 로 넘기고 여기서 결정론으로.
+    avoid = 영역 이름 제외(title 있으면 "top"), taken = 이미 놓인 텍스트 rect 들.
+    """
+    W, H = size
+    order = tuple(p for p in layout.AUTO_ORDER if p not in avoid)
+    rects = {p: _text_rect(text, W, H, p) for p in order}
+    return layout.pick_region(rects, _boxes_out(clips, ws, W, H), list(taken), order)
+
+
 def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
     """텍스트 PNG — 8방위 영역, 자동 개행.
 
@@ -498,21 +564,11 @@ def _title_png(text: str, W: int, H: int, out: Path, pos: str = "bottom"):
     네 구석 = 모서리 정렬(왼쪽 구석 왼쪽 정렬·오른쪽 구석 오른쪽 정렬), 안쪽으로 성장.
     상/하 중앙 행은 화면 폭 86%, 좌/우·구석은 40%로 개행해 영역감 유지.
     """
-    from PIL import Image, ImageDraw, ImageFont
-    if pos not in TEXT_POSITIONS:
-        pos = "bottom"
+    from PIL import Image, ImageDraw
+    font, lines, widths, lh, gap, x0, y0, block_w, block_h, align = \
+        _text_block(text, W, H, pos)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    font = ImageFont.truetype(_KFONT, max(28, W // 18))
-    max_w = int(W * (0.40 if "-" in pos or pos in ("left", "right") else 0.86))
-    lines = _wrap_lines(text, font, d.textlength, max_w)
-    ascent, descent = font.getmetrics()
-    lh = ascent + descent
-    gap = lh // 4
-    block_h = len(lines) * lh + (len(lines) - 1) * gap
-    widths = [d.textlength(ln, font=font) for ln in lines]
-    block_w = max(widths)
-    x0, y0, align = _block_origin(pos, W, H, block_w, block_h, lh)
     d.rectangle([x0 - 18, y0 - 14, x0 + block_w + 18, y0 + block_h + 18],
                 fill=(0, 0, 0, 150))
     for i, ln in enumerate(lines):
@@ -578,13 +634,16 @@ def _overlay_text(src: Path, text: str, out: Path, size: tuple[int, int],
 # --------------------------------------------------------------------------- #
 def render_block(block: EditBlock, sources, tmp: Path, idx: int,
                  size=(768, 432), fps=30.0, exclude: set | None = None,
-                 ws: Workspace | None = None):
-    """블록 1개 렌더(클립선택 → 연산 → 전환 → 배속 → 자막). 반환 (영상경로, 쓴 클립들).
-    클립 없으면 (None, [])."""
+                 ws: Workspace | None = None, avoid: tuple = ()):
+    """블록 1개 렌더(클립선택 → 연산 → 전환 → 배속 → 자막).
+    반환 (영상경로, 쓴 클립들, 확정 자막 pos|None). 클립 없으면 (None, [], None).
+
+    avoid = auto 배치에서 제외할 영역 이름들(전역 title 있으면 "top" — 호출부가 안다).
+    """
     ws = ws or Workspace.dev()
     clips = compile_editlist(block, sources, ws, exclude)
     if not clips:
-        return None, []
+        return None, [], None
     parts = []
     for i, (mp4, t0, t1) in enumerate(clips):
         p = tmp / f"b{idx}_clip{i:03d}.mp4"
@@ -595,16 +654,27 @@ def render_block(block: EditBlock, sources, tmp: Path, idx: int,
     if block.speed != 1.0:
         sped = tmp / f"b{idx}_speed.mp4"
         _apply_speed(vid, block.speed, sped); vid = sped
+    cap_pos = None
     if block.caption:                       # 블록별 자막을 그 블록에만 박는다
         cap = tmp / f"b{idx}_cap.mp4"
+        cap_pos = block.caption_pos
+        if cap_pos == AUTO_POS:             # 저작 기본 — 주인공이 비는 영역으로
+            cap_pos = ("bottom" if block.zoom == "gradual"   # 줌은 투영이 안 맞음
+                       else _auto_pos(block.caption, clips, ws, size, avoid))
+        bd = _probe_dur(str(vid))
         win = None
         if block.caption_span:              # [비율] → 실측 블록 길이 기준 초
-            bd = _probe_dur(str(vid))
             win = (block.caption_span[0] * bd, block.caption_span[1] * bd)
-        _overlay_text(vid, block.caption, cap, size, pos=block.caption_pos,
-                      window=win)
+        # 가독성 안전망(경고만) — 예산은 저작 프롬프트가 앞단에서 유도. 자주 발동하면
+        # 프롬프트 회귀 신호(_watch_echo 결). 블록 자막은 유저 소유일 수 있어 안 지운다.
+        shown = (win[1] - win[0]) if win else bd
+        req = layout.required_secs(block.caption)
+        if 0 < shown < req:
+            print(f"  [가독성] ⚠️ 블록{idx} 자막 {len(block.caption)}자/{shown:.1f}s "
+                  f"(필요 {req:.1f}s) — 저작 예산 프롬프트 점검 신호")
+        _overlay_text(vid, block.caption, cap, size, pos=cap_pos, window=win)
         vid = cap
-    return vid, clips
+    return vid, clips, cap_pos
 
 
 def _apply_reservation(sources, pins: list[set]) -> list[list]:
@@ -626,26 +696,80 @@ def allowed_sources_per_block(plan: EditPlan, sources, ws: Workspace) -> list[li
     return _apply_reservation(sources, pins)
 
 
+def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
+                     size: tuple[int, int], ws: Workspace):
+    """블록 걸침 카피(plan.texts) 번인 — 표시창은 *생존 블록*의 실측 경계로 계산
+    (블록 드롭 시 원 인덱스 기준), 자리는 주인공·title·블록 자막·먼저 놓인 카피를
+    피해 결정론으로. 가독성 미달은 경고 후 드롭(저작 예산 프롬프트의 회귀 신호).
+
+    infos = [(원 블록 idx, block, clips, 실측 dur, 확정 자막 pos)] 렌더 순서.
+    블록들은 cut concat 이라 경계 = 누적 실측 길이(산수, 누적오차 없음).
+    """
+    W, H = size
+    bounds, t = {}, 0.0                     # 원 idx → 최종 타임라인 (시작, 끝) 초
+    for oi, _b, _c, d, _p in infos:
+        bounds[oi] = (t, t + d); t += d
+    taken: list[tuple[tuple, tuple]] = []   # (rect, 표시창) — 시간 겹칠 때만 자리 충돌
+    if plan.title:
+        taken.append((_text_rect(plan.title, W, H, "top"), (0.0, t)))
+    for oi, b, _c, _d, cap_pos in infos:
+        if b.caption and cap_pos:
+            taken.append((_text_rect(b.caption, W, H, cap_pos), bounds[oi]))
+    cur = src
+    for k, tx in enumerate(plan.texts):
+        sel = [(oi, c) for oi, _b, c, _d, _p in infos
+               if tx.blocks[0] <= oi <= tx.blocks[1]]
+        if not sel:
+            print(f"  [카피] ⚠️ texts[{k}] 대상 블록 전멸 → 드롭: {tx.text[:20]!r}")
+            continue
+        w0, w1 = bounds[sel[0][0]][0], bounds[sel[-1][0]][1]
+        win = layout.resolve_window(w0, w1, tx.span, layout.required_secs(tx.text))
+        if win is None:
+            print(f"  [가독성] ⚠️ texts[{k}] {len(tx.text)}자를 {w1 - w0:.1f}s 창에 "
+                  f"못 읽음 → 드롭 — 저작 예산 프롬프트 점검 신호")
+            continue
+        clips = [cl for _oi, c in sel for cl in c]
+        concurrent = [r for r, w in taken if min(w[1], win[1]) > max(w[0], win[0])]
+        pos = tx.pos
+        if pos == AUTO_POS:
+            pos = _auto_pos(tx.text, clips, ws, size, taken=concurrent)
+        nxt = src.with_name(f"{src.stem}_txt{k}.mp4")
+        _overlay_text(cur, tx.text, nxt, size, pos=pos, window=win)
+        taken.append((_text_rect(tx.text, W, H, pos), win))
+        cur = nxt
+        print(f"  [카피] texts[{k}] @{pos} {win[0]:.1f}~{win[1]:.1f}s: {tx.text!r}")
+    Path(cur).replace(out)
+
+
 def render_plan(plan: EditPlan, sources, out_path: str, size=(768, 432), fps=30.0,
                 ws: Workspace | None = None):
-    """블록들을 순서대로 렌더(클립 중복 방지·핀 예약) → 이어붙이기 → 전역 title."""
+    """블록들을 순서대로 렌더(클립 중복 방지·핀 예약) → 이어붙이기 → 전역 title
+    → 블록 걸침 카피(plan.texts)."""
     ws = ws or Workspace.dev()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     allowed = allowed_sources_per_block(plan, sources, ws)
+    avoid = ("top",) if plan.title else ()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        block_vids, used = [], set()
+        block_vids, used, infos = [], set(), []
         for idx, block in enumerate(plan.blocks):
-            bv, clips = render_block(block, allowed[idx], tmp, idx, size, fps,
-                                     exclude=used, ws=ws)
+            bv, clips, cap_pos = render_block(block, allowed[idx], tmp, idx, size, fps,
+                                              exclude=used, ws=ws, avoid=avoid)
             if bv is not None:
-                block_vids.append((bv, _probe_dur(str(bv))))
+                d = _probe_dur(str(bv))
+                block_vids.append((bv, d))
+                infos.append((idx, block, clips, d, cap_pos))
                 used.update(clips)          # 다음 블록이 같은 클립 안 쓰게
         if not block_vids:
             raise SystemExit("선택된 클립이 없음 (어떤 블록도 조건에 맞는 구간 없음).")
         stitched_all = tmp / "all.mp4"
         _stitch([b for b, _ in block_vids], [d for _, d in block_vids], "cut", stitched_all)
-        _overlay_text(stitched_all, plan.title, Path(out_path), size, pos="top")
+        if plan.texts:
+            titled = tmp / "titled.mp4"
+            _overlay_text(stitched_all, plan.title, titled, size, pos="top")
+            _burn_plan_texts(titled, plan, infos, Path(out_path), size, ws)
+        else:
+            _overlay_text(stitched_all, plan.title, Path(out_path), size, pos="top")
 
 
 def _probe_dur(path: str) -> float:

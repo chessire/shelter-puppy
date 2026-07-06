@@ -23,13 +23,21 @@ from __future__ import annotations
 import json
 import re
 
-from . import TEXT_POSITIONS, EditBlock, EditPlan
+from . import AUTO_POS, TEXT_POSITIONS, EditBlock, EditPlan, PlanText
+from .layout import READ_CPS
 from ..workspace import Workspace
 
 MODEL = "gemma4:26b-a4b-it-q4_K_M"
 AUTHOR_TEMP = 0.9    # 창작 다양성 — 사용자: "돌릴 때마다 달라도 상관없다"
 MAX_BLOCKS = 6
 DUR_MIN, DUR_MAX = 2.0, 12.0
+MAX_TEXTS = 2        # 블록 걸침 카피 상한 — 동시에 떠 있는 글이 많으면 못 읽는다
+
+# 저작 프롬프트의 자막 글자 예산(자/초) — 진짜 한계(READ_CPS)의 절반. LLM 은 글자
+# 수를 못 세므로 예산은 마진이 본체다: 2배를 넘겨도 아직 읽을 수 있는 값을 준다
+# (앞단 예산 = 생성 유도, 뒷단 layout.required_secs = 경고 위주 안전망 — 사용자
+# 확정 2026-07-06 "가드는 앞에"). 숫자 임계는 내용 상수가 아니라 지시라 허용.
+BUDGET_CPS = READ_CPS / 2
 
 # 이모지·기호 — PIL 기본 한글 폰트가 못 그려 화면에 두부(□)로 박힌다(렌더러 제약의
 # 계기 보정, 어휘 아님). 실측: 저작 title 에 🐾 유출.
@@ -113,20 +121,28 @@ def _records(ws: Workspace, avail: list[str], profiles: dict) -> str:
 
 
 def _schema(names: list[str]) -> dict:
+    pos_enum = list(TEXT_POSITIONS) + [AUTO_POS]   # 저작만 auto 허용(번역 enum 은 8방위)
     block = {"type": "object", "properties": {
         "sources": {"type": "array", "items": {"enum": names}},
         "select": {"type": "string", "enum": ["dynamic", "static", "all", "묘기"]},
         "dur": {"type": "number"},
         "zoom": {"type": "string", "enum": ["none", "gradual"]},
         "caption": {"type": "string"},
-        "caption_pos": {"type": "string", "enum": list(TEXT_POSITIONS)},
+        "caption_pos": {"type": "string", "enum": pos_enum},
         "caption_span": {"type": "array", "items": {"type": "number"}},
         "narration": {"type": "string"},
     }, "required": ["sources", "select", "dur", "caption"]}   # dur 필수 — 미기입 시
     # 블록이 pace 기본값(컷당 2초)으로 흘러 총 길이가 목표 미달(실측 12.2s)
+    text = {"type": "object", "properties": {
+        "text": {"type": "string"},
+        "blocks": {"type": "array", "items": {"type": "integer"}},
+        "pos": {"type": "string", "enum": pos_enum},
+        "span": {"type": "array", "items": {"type": "number"}},
+    }, "required": ["text", "blocks"]}
     return {"type": "object",
             "properties": {"title": {"type": "string"},
-                           "blocks": {"type": "array", "items": block}},
+                           "blocks": {"type": "array", "items": block},
+                           "texts": {"type": "array", "items": text}},
             "required": ["blocks"]}
 
 
@@ -163,16 +179,25 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         "아니면 none\n"
         "- caption: 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
         "문장으로 써라(요청문을 옮겨 적지 마라). 강아지 이름과 고객의 말투는 "
-        "따른다. 매 블록 반드시 채운다(빈 문자열 금지).\n"
-        "- caption_pos: 자막 위치(bottom/top/left/right/top-left/top-right/"
-        "bottom-left/bottom-right) — 기본 bottom, 연출상 필요할 때만 변경. "
-        "텍스트끼리 겹치지 않게 하라: title 을 채웠으면 블록 자막은 top 을 피하고, "
-        "우상단(top-right)엔 AI 표시가 있으니 되도록 피한다.\n"
+        "따른다. 매 블록 반드시 채운다(빈 문자열 금지). 자막은 눈으로 읽는 "
+        f"글이다 — 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라"
+        f"(예: 5초 블록 ≤ {BUDGET_CPS * 5:.0f}자). 길면 문장을 줄여라.\n"
+        "- caption_pos: 기본 auto — 렌더러가 강아지를 가리지 않는 빈 자리를 "
+        "자동으로 고른다(너는 화면을 못 보므로 auto 가 안전하다). 특별한 연출 "
+        "의도가 있을 때만 8방위(bottom/top/left/right/top-left/top-right/"
+        "bottom-left/bottom-right) 지정. 우상단(top-right)엔 AI 표시가 있고, "
+        "title 을 채웠으면 top 도 title 자리다 — 둘 다 쓰지 마라.\n"
         "- caption_span: 자막이 장면에 맞춰 떴다 사라지게 하고 싶으면 블록 길이 "
         "대비 [시작,끝] 0~1 비율(예: [0.2,0.8]), 내내 표시면 생략\n"
         "- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
         "- title: 화면에 박을 *영상 자체의* 짧은 제목(요청문을 설명하는 '~만들기' "
         "같은 문구가 아니다), 필요 없으면 빈 문자열\n"
+        "- (선택) 최상위 texts: *장면 여러 개에 걸쳐* 떠 있는 카피 — 한 문장이 "
+        "블록 하나로는 못 읽을 만큼 길거나, 블록 자막과 별도 위치에 동시에 "
+        "보여줄 보조 카피면 블록 caption 대신 여기에. "
+        "{text, blocks:[시작,끝 블록 번호], pos(비우면 자동 배치), span} 형식, "
+        f"최대 {MAX_TEXTS}개. 걸친 블록들의 길이 합 1초당 {BUDGET_CPS:.0f}자 이내. "
+        "동시에 떠 있는 글이 많으면 시청자가 못 읽는다 — 꼭 필요할 때만.\n"
         "자막·내레이션이 소재의 관찰 기록과 어긋나지 않게 하라.")
     # 재시도 조건 = JSON 실패 + 구조 무효(블록 0개 또는 자막·대본 전무 — 텍스트 0인
     # 소개 영상은 창작 다양성이 아니라 결함, 실측: 전 블록 caption 빈 값 복권).
@@ -205,7 +230,9 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
             "zoom": d.get("zoom", "none"),
             "caption": (_watch_echo(d.get("caption", ""), request, "caption")
                         if allow_caption else ""),
-            "caption_pos": d.get("caption_pos"),
+            # 저작 기본 = auto(빈 곳 자동 배치) — 위치는 구도의 사실이라 픽셀을 보는
+            # 렌더러 몫. 8방위 명시는 저작의 연출 의도로 존중한다.
+            "caption_pos": d.get("caption_pos") or AUTO_POS,
             "caption_span": d.get("caption_span"),
             "narration": (_watch_echo(d.get("narration", ""), request, "narration")
                           if narration else ""),
@@ -220,10 +247,34 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
     blocks = [b for b in blocks if b.sources or b.select != "all" or b.caption or b.narration]
     if not blocks:
         return None
+    title = _watch_echo(str(raw.get("title") or ""), request, "title")
+    # 블록 걸침 카피(texts) 소독 — 복창 감시 + 인덱스 클램프 + 상한. 자막 거부
+    # 요청이면 카피도 텍스트이므로 통째로 버린다(부정 핀 우선).
+    texts = []
+    if allow_caption:
+        for d in (raw.get("texts") or [])[:MAX_TEXTS]:
+            if not isinstance(d, dict):
+                continue
+            t = PlanText.from_dict(
+                dict(d, text=_watch_echo(str(d.get("text") or ""), request, "texts")))
+            if t.text and t.blocks and t.blocks[0] < len(blocks):
+                t.blocks = [min(t.blocks[0], len(blocks) - 1),
+                            min(t.blocks[1], len(blocks) - 1)]
+                texts.append(t)
+    # 상시 요소와의 충돌 소독 — top-right=AI 배지, top=title 자리(채웠을 때).
+    # 저작 위치 지정은 연출 재량이지만 상시 요소와의 겹침은 항상 결함(실측: title
+    # 채우고 블록0 자막 @top)이라 재량이 아니다 → auto 강등(빈 곳 자동이 대신 찾음).
+    for x in blocks + texts:
+        pos = x.caption_pos if isinstance(x, EditBlock) else x.pos
+        if pos == "top-right" or (title and pos == "top"):
+            if isinstance(x, EditBlock):
+                x.caption_pos = AUTO_POS
+            else:
+                x.pos = AUTO_POS
     # 텍스트 전무 = 결함(재추첨) — 단 고객이 자막을 거부했으면 무자막이 곧 의도.
-    if allow_caption and not any(b.caption or b.narration for b in blocks):
+    if allow_caption and not any(b.caption or b.narration for b in blocks) and not texts:
         return None
-    return EditPlan(blocks=blocks, title=_watch_echo(str(raw.get("title") or ""), request, "title"))
+    return EditPlan(blocks=blocks, texts=texts, title=title)
 
 
 # --------------------------------------------------------------------------- #
@@ -309,8 +360,9 @@ def fill_plan(request: str, ws: Workspace, names: list[str],
         + _records(ws, avail, profiles) +
         "\n\n'(채울 것)' 표시된 빈 항목만 채워라. 블록 순서 그대로 blocks 배열로 "
         "출력하고, 이미 값이 있는 항목의 출력은 무시된다.\n"
-        "- caption: 화면 하단 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
-        "문장으로(요청문을 옮겨 적지 마라). 강아지 이름·고객의 말투는 따른다.\n"
+        "- caption: 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
+        "문장으로(요청문을 옮겨 적지 마라). 강아지 이름·고객의 말투는 따른다. "
+        f"눈으로 읽는 글이니 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라.\n"
         "- dur: 그 블록 길이(초, 3~10)\n"
         "- sources: 키워드 없는 블록만 — 그 장면에 어울리는 소재 이름 1~3개"
         "(관찰 기록을 근거로)")
@@ -343,8 +395,11 @@ def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
                 cap = _watch_echo(d.get("caption", ""), request, "caption")
                 if cap:
                     b.caption = cap
-                    if d.get("caption_pos") in TEXT_POSITIONS:
-                        b.caption_pos = d["caption_pos"]
+                    # 저작이 채운 자막 = 저작 소유 → 위치도 auto(빈 곳 자동 배치).
+                    # 8방위 출력이 있으면 존중(현 fill 스키마엔 없음 — 예비).
+                    b.caption_pos = (d["caption_pos"]
+                                     if d.get("caption_pos") in TEXT_POSITIONS
+                                     else AUTO_POS)
                     b.caption_span = EditBlock._clean_span(d.get("caption_span"))
                     filled.append(f"caption={cap!r}@{b.caption_pos}")
             if not b.target_dur:

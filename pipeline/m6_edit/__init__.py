@@ -21,6 +21,12 @@ from typing import Optional
 TEXT_POSITIONS = ("top", "bottom", "left", "right",
                   "top-left", "top-right", "bottom-left", "bottom-right")
 
+# 자동 배치(2026-07-06): 렌더러가 주인공 박스(M1+M2)와 겹치지 않는 빈 영역을 고른다
+# (layout.pick_region). 위치는 구도의 사실이라 픽셀만 안다 — 저작(Gemma)은 소재
+# 기록만 보므로 기본이 auto, 8방위 지정은 연출 의도가 있을 때만. 번역(유저) 경로는
+# 기존 그대로(명시=핀, 미명시=bottom) — 유저 자막 위치는 결정론도 옮기지 않는다.
+AUTO_POS = "auto"
+
 # 블록 1개의 JSON 스키마(Gemma format= 강제). 고수준 의도만, 실제 구간은 컴파일러가.
 _BLOCK_PROPS = {
     "select": {"type": "string", "enum": ["dynamic", "static", "all", "묘기"]},
@@ -106,7 +112,8 @@ class EditBlock:
             zoom=str(d.get("zoom", "none")),
             speed=(float(sp) if sp else 1.0),
             caption=str(d.get("caption", "") or ""),
-            caption_pos=(str(d.get("caption_pos")) if d.get("caption_pos") in TEXT_POSITIONS
+            caption_pos=(str(d.get("caption_pos"))
+                         if d.get("caption_pos") in TEXT_POSITIONS + (AUTO_POS,)
                          else "bottom"),
             caption_span=cls._clean_span(d.get("caption_span")),
             keywords=[str(k) for k in (d.get("keywords") or [])],
@@ -117,14 +124,51 @@ class EditBlock:
 
 
 @dataclass
+class PlanText:
+    """장면(블록) 여러 개에 걸치는 카피 — 블록 caption 이 못 하는 두 가지를 담당:
+    ①한 문장이 블록 하나로는 못 읽을 만큼 길 때 여러 장면에 걸쳐 띄우기
+    ②블록 자막과 *다른 위치*에 동시에 뜨는 보조 카피(멀티 카피).
+
+    blocks=[시작,끝] 블록 인덱스(포함) — 렌더러가 그 블록들의 실측 경계로 표시창을
+    계산한다(블록 드롭 시 생존 블록 기준). 저작 전용 — 번역(유저) 경로엔 없다
+    (전역 상시 문구는 기존 title 이 담당, 초소형 출력 원칙).
+    """
+    text: str = ""
+    blocks: list = None          # [시작, 끝] 블록 인덱스(포함)
+    pos: str = AUTO_POS          # 8방위 or auto(빈 곳 자동)
+    span: Optional[list] = None  # 블록 범위 창 대비 [시작,끝] 0~1 비율(None=내내)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlanText":
+        bl = d.get("blocks")
+        if isinstance(bl, (list, tuple)) and len(bl) >= 1:
+            try:
+                idx = sorted(max(0, int(b)) for b in bl[:2])
+                bl = [idx[0], idx[-1]]
+            except (TypeError, ValueError):
+                bl = None
+        else:
+            bl = None
+        return cls(
+            text=str(d.get("text", "") or "").strip(),
+            blocks=bl,
+            pos=(str(d.get("pos")) if d.get("pos") in TEXT_POSITIONS else AUTO_POS),
+            span=EditBlock._clean_span(d.get("span")),
+        )
+
+
+@dataclass
 class EditPlan:
-    """전역 title + 순서 있는 블록들."""
+    """전역 title + 순서 있는 블록들 (+저작의 블록 걸침 카피들)."""
     blocks: list[EditBlock] = field(default_factory=list)
     title: str = ""
+    texts: list[PlanText] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "EditPlan":
         blocks = [EditBlock.from_dict(b) for b in d.get("blocks", [])]
         if not blocks:
             blocks = [EditBlock()]   # 빈 plan 방어
-        return cls(blocks=blocks, title=str(d.get("title", "") or ""))
+        texts = [t for t in (PlanText.from_dict(x) for x in d.get("texts") or [])
+                 if t.text and t.blocks]
+        return cls(blocks=blocks, title=str(d.get("title", "") or ""), texts=texts)

@@ -376,8 +376,10 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
                 return plan
             for i, b in enumerate(authored.blocks):
                 print(f"     블록{i}: {b.sources} select={b.select} dur={b.target_dur} "
-                      f"zoom={b.zoom} caption={b.caption!r}"
+                      f"zoom={b.zoom} caption={b.caption!r}@{b.caption_pos}"
                       + (f" narration={b.narration!r}" if b.narration else ""))
+            for t in authored.texts:
+                print(f"     카피(블록{t.blocks[0]}~{t.blocks[1]}@{t.pos}): {t.text!r}")
             return authored
         return fill_plan(request, ws, names, plan, narration=want_narration)
 
