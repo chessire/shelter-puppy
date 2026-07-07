@@ -535,6 +535,10 @@ def profile_text(prof: dict, extra: str | None = None) -> str:
     cap = (prof.get("caption") or "").strip()
     if cap:
         parts.append("묘사: " + cap)
+    # ⚠️ 행동 축(behavior)은 여기 넣지 않는다 — 매칭 합류 골든 재채점(2026-07-07):
+    # 행동 없이 6/7 안정 → 행동 포함 5/7(카페-0069 소실 3/3, 증거 빈약 축을 행동
+    # 텍스트가 흔듦) = 기각. 행동은 저작·검수 기록(author._record_lines) 전용,
+    # 거기선 검수 배터리 21/21. 재도전 시 골든 재채점 필수.
     return " | ".join(parts)
 
 

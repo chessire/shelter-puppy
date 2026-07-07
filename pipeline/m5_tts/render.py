@@ -35,6 +35,10 @@ from ..m6_edit.run import (_apply_speed, _burn_plan_texts, _overlay_text,
 from ..workspace import Workspace
 
 _MIN_TAIL = 0.15   # 구절 끝과 컷 사이 최소 숨(초) — 이보다 짧으면 영상을 늘린다
+# 발화 리드인(초) — 자막 페이드인(0.25s)이 끝난 *뒤* 목소리가 시작(자막이 먼저,
+# 읽기가 따라오는 관행). 없으면 목소리가 자막보다 앞서는 스큐(체셔 실측 2026-07-07,
+# 주범은 저작 caption_span 이었지만 페이드 몫 ~0.3s 도 이 리드인이 흡수). [잠정]
+_VOICE_LEAD = 0.4
 _TTS_SR = 24000
 
 
@@ -77,7 +81,7 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         for idx, block in enumerate(plan.blocks):
             row = row_by_block.get(idx)
             if row is not None:
-                need = _phrase_sec(row) + DEFAULT_PAUSE
+                need = _VOICE_LEAD + _phrase_sec(row) + DEFAULT_PAUSE
                 block.target_dur = max(block.target_dur or 0.0, need)
             vid, clips, cap_pos = render_block(block, allowed[idx], tmp, idx, size,
                                                fps, exclude=used, ws=ws)
@@ -89,8 +93,8 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
             vd = _probe_dur(str(vid))
             if row is not None:
                 psec = _phrase_sec(row)
-                if vd < psec + _MIN_TAIL:      # 길이는 음성이 이긴다 — 영상을 늘린다
-                    target = psec + DEFAULT_PAUSE
+                if vd < _VOICE_LEAD + psec + _MIN_TAIL:   # 길이는 음성이 이긴다
+                    target = _VOICE_LEAD + psec + DEFAULT_PAUSE
                     stretched = tmp / f"b{idx}_stretch.mp4"
                     _apply_speed(vid, vd / target, stretched)
                     vid, vd = stretched, _probe_dur(str(stretched))
@@ -122,11 +126,15 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
             else:
                 data, sr = _read_wav(Path(row["wav"]))
                 assert sr == _TTS_SR, f"TTS 샘플레이트 예상 밖: {sr}"
+                # 리드인 무음 → 구절 → 꼬리 무음. 블록이 빠듯하면 리드인이 줄어드는
+                # 방어(발화를 자르는 것보다 스큐가 낫다).
+                lead = min(_VOICE_LEAD, max(0.0, vd - len(data) / sr))
+                chunks.append(np.zeros(int(lead * sr), dtype=np.int16))
                 chunks.append(data)
-                tail = max(0.0, vd - len(data) / sr)
+                tail = max(0.0, vd - lead - len(data) / sr)
                 chunks.append(np.zeros(int(tail * sr), dtype=np.int16))
-                timeline.append({"text": row["text"], "start": round(t, 3),
-                                 "end": round(t + len(data) / sr, 3),
+                timeline.append({"text": row["text"], "start": round(t + lead, 3),
+                                 "end": round(t + lead + len(data) / sr, 3),
                                  "asr_flag": row["asr_flag"]})
             t += vd
         narr_wav = tmp / "narration.wav"

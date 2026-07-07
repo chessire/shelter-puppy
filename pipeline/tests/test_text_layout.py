@@ -285,19 +285,26 @@ def test_voice_discretion_gate():
     assert not voice_discretion_allowed("edit", False, "우리 토리 소개 영상 만들어줘")
 
 
-def test_to_plan_voice_reads_caption_verbatim():
+def test_to_plan_voice_is_video_level_genre():
+    # 재량 TTS = 영상 단위 장르 결정(2026-07-07 위화감 피드백) — 읽으면 자막 있는
+    # *모든* 블록을 읽는다(내레이터 존재의 일관성, 블록별 on/off 기각).
     raw = _raw([])
-    raw["blocks"][0]["voice"] = True
-    raw["blocks"][1]["voice"] = False
+    raw["voice"] = True
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
-    assert plan.blocks[0].narration == plan.blocks[0].caption == "블록 자막"
-    assert plan.blocks[1].narration == ""
+    assert all(b.narration == b.caption for b in plan.blocks if b.caption)
+
+
+def test_to_plan_voice_false_all_silent():
+    raw = _raw([])
+    raw["voice"] = False
+    plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
+    assert all(not b.narration for b in plan.blocks)
 
 
 def test_to_plan_voice_ignored_without_choice():
     # 게이트 닫힘(유저가 TTS 언급) — voice 출력이 있어도 읽지 않는다
     raw = _raw([])
-    raw["blocks"][0]["voice"] = True
+    raw["voice"] = True
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False)
     assert all(not b.narration for b in plan.blocks)
 
@@ -305,15 +312,31 @@ def test_to_plan_voice_ignored_without_choice():
 def test_to_plan_voice_needs_caption():
     raw = _raw([])
     raw["blocks"][0]["caption"] = ""
-    raw["blocks"][0]["voice"] = True
+    raw["voice"] = True
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
-    assert plan.blocks[0].narration == ""
+    assert plan.blocks[0].narration == ""           # 자막 없는 블록만 무음
+    assert plan.blocks[1].narration == "둘째 자막"
+
+
+def test_to_plan_voiced_caption_drops_span():
+    # 읽는 자막(내레이션=자막)은 span 금지 — 저작 span 이 자막을 발화보다 ~1초
+    # 늦추는 AV 스큐(simple-demo3 실측 2026-07-07). 무음 영상의 span 은 유지.
+    raw = _raw([])
+    raw["voice"] = True
+    raw["blocks"][0]["caption_span"] = [0.3, 0.7]
+    plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
+    assert plan.blocks[0].caption_span is None      # 동기 > 저작 재량
+    raw2 = _raw([])
+    raw2["voice"] = False
+    raw2["blocks"][0]["caption_span"] = [0.3, 0.7]
+    plan2 = _to_plan(raw2, "요청", ["a", "b"], narration=False, voice_choice=True)
+    assert plan2.blocks[0].caption_span == [0.3, 0.7]
 
 
 def test_to_plan_voice_moderates_texts():
     raw = _raw([{"text": "카피1", "blocks": [0, 0]},
                 {"text": "카피2", "blocks": [1, 1]}])
-    raw["blocks"][0]["voice"] = True
+    raw["voice"] = True
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
     assert len(plan.texts) == 1                     # 목소리 켜면 화면 글 절제
 
@@ -337,6 +360,15 @@ def test_apply_rewrites_sanitizes_and_bounds():
     old = plan.blocks[0].caption
     _apply_rewrites(plan, {0: req, 7: "범위 밖", "x": "비정수"}, req)
     assert plan.blocks[0].caption == old                    # 복창 재작성 = 소독 후 무시
+
+
+def test_apply_rewrites_narration_field():
+    from pipeline.m6_edit.author import _apply_rewrites
+    plan = _to_plan(_raw([]), "요청", ["a", "b"], narration=False)
+    plan.blocks[0].narration = "지어낸 내레이션"             # 자막과 다른 저작 작문
+    _apply_rewrites(plan, {0: "기록 범위 내레이션"}, "요청", field="narration")
+    assert plan.blocks[0].narration == "기록 범위 내레이션"
+    assert plan.blocks[0].caption == "블록 자막"             # 자막은 무접촉
 
 
 # ── 렌더러 기하(단일 출처) ──────────────────────────────────────────────────

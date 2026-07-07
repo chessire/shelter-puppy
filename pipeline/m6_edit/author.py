@@ -118,8 +118,8 @@ def _record_lines(ws: Workspace, avail: list[str], profiles: dict) -> dict:
     from ..m4_action.observe import motion_summary, profile_text
     from .run import _probe_dur
     tags = ws.scene_tags()
-    # 행동 관찰(behavior)은 저작·검수 기록에만 합류 — profile_text(장면 매칭 입력)에
-    # 넣으면 골든 5/6 재채점이 필요해진다(observe.behavior 주석 참고).
+    # 행동 관찰(behavior)은 저작·검수 기록에만 합류 — 매칭(profile_text) 합류는
+    # 골든 재채점 5/7 회귀로 기각(observe.profile_text 주석, 2026-07-07 실측).
     return {n: (f"[{n}] 길이 {max(_probe_dur(str(ws.analysis(n))), 0):.0f}초 | "
                 f"{profile_text(profiles[n], motion_summary(ws, n))}"
                 + (f" | 행동: {profiles[n]['behavior']}"
@@ -146,18 +146,22 @@ def _schema(names: list[str], voice_choice: bool = False) -> dict:
         "narration": {"type": "string"},
     }, "required": ["sources", "select", "dur", "caption"]}   # dur 필수 — 미기입 시
     # 블록이 pace 기본값(컷당 2초)으로 흘러 총 길이가 목표 미달(실측 12.2s)
-    if voice_choice:                    # 재량 TTS — 필수화(dur 미기입 습성과 같은 방어)
-        block["properties"]["voice"] = {"type": "boolean"}
-        block["required"] = block["required"] + ["voice"]
     text = {"type": "object", "properties": {
         "text": {"type": "string"},
         "blocks": {"type": "array", "items": {"type": "integer"}},
     }, "required": ["text", "blocks"]}
-    return {"type": "object",
-            "properties": {"title": {"type": "string"},
-                           "blocks": {"type": "array", "items": block},
-                           "texts": {"type": "array", "items": text}},
-            "required": ["blocks"]}
+    schema = {"type": "object",
+              "properties": {"title": {"type": "string"},
+                             "blocks": {"type": "array", "items": block},
+                             "texts": {"type": "array", "items": text}},
+              "required": ["blocks"]}
+    if voice_choice:
+        # 재량 TTS 는 *영상 단위* 장르 결정(2026-07-07 체셔 "위화감" — 내레이터는
+        # 등장하는 순간 존재가 성립, 블록별 on/off 는 연출이 아니라 고장으로 읽힘).
+        # 필수화 = dur 미기입 습성과 같은 방어.
+        schema["properties"]["voice"] = {"type": "boolean"}
+        schema["required"] = schema["required"] + ["voice"]
+    return schema
 
 
 def author_plan(request: str, ws: Workspace, names: list[str],
@@ -214,10 +218,11 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         "대비 [시작,끝] 0~1 비율(예: [0.2,0.8]), 내내 표시면 생략\n"
         + ("- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
            if narration else "")
-        + ("- voice: 이 블록의 자막을 목소리가 *그대로* 읽게 하려면 true, 아니면 "
-           "false. 새 문장을 짓는 게 아니다 — 읽는 것은 화면 자막 그 문장이다. "
-           "영상 분위기에 어울릴 때만 켜라(조용히 보여주는 게 나은 장면은 false, "
-           "무작정 다 읽지 않는다). 목소리를 쓰기로 했다면 화면 글은 더 절제하라.\n"
+        + ("- 최상위 voice: 이 영상에 내레이션이 어울리는지의 *장르 결정* — "
+           "true 면 모든 블록의 자막을 목소리가 그대로 읽고, false 면 목소리 "
+           "없는 자막 영상이 된다. 새 문장을 짓는 게 아니다 — 읽는 것은 화면 "
+           "자막 그 문장들이다. 블록별로 읽었다 말았다 할 수 없다(시청자에게 "
+           "고장으로 들린다). 목소리를 쓰기로 했다면 화면 글은 더 절제하라.\n"
            if voice_choice else "")
         + "- title: 제목(Level 1) — 화면 상단에 박을 *영상 자체의* 짧은 제목"
         "(요청문을 설명하는 '~만들기' 같은 문구가 아니다), 필요 없으면 빈 문자열\n"
@@ -242,12 +247,15 @@ def author_plan(request: str, ws: Workspace, names: list[str],
             continue
         plan = _to_plan(raw, request, avail, narration, allow_caption, voice_choice)
         if plan is not None:
-            if allow_caption:
-                # 검수는 부가 안전망 — 실패해도 저작을 죽이지 않는다(안전한 저하).
+            # 검수는 부가 안전망 — 실패해도 저작을 죽이지 않는다(안전한 저하).
+            # 자막 + (모드 A) 저작이 쓴 내레이션 — 저작 소유 텍스트는 전부 검수.
+            for field, on in (("caption", allow_caption), ("narration", narration)):
+                if not on:
+                    continue
                 try:
-                    _verify_captions(plan, request, ws, avail, profiles)
+                    _verify_captions(plan, request, ws, avail, profiles, field=field)
                 except Exception as e:
-                    print(f"     [검수] 건너뜀({type(e).__name__}: {e})")
+                    print(f"     [검수] {field} 건너뜀({type(e).__name__}: {e})")
             return plan
     return None
 
@@ -321,41 +329,49 @@ def _caption_fabricated(caption: str, record: str,
 
 
 def _verify_captions(plan: EditPlan, request: str, ws: Workspace,
-                     avail: list[str], profiles: dict) -> None:
-    """자막 사실 검수 — 블록당 logprob 판정 + 걸린 블록만 증거 제한 재작성.
+                     avail: list[str], profiles: dict, field: str = "caption",
+                     only: set | None = None) -> None:
+    """저작 텍스트 사실 검수 — 주장 분해 판정 + 걸린 블록만 증거 제한 재작성.
 
     병인(simple-demo3 실측 2026-07-07): 저작이 프로필의 사물 단서를 사건 서사로
     부풀림('식기 주변에서 움직임'→'밥 먹을 때가 제일 신나요', '문틈 사이로 손을
     향해 다가옴'→'문틈 사이로 살짝 나타난') + 그 자막이 다른 소재 블록에 얹힘.
-    자막을 못 비우므로(L2=서사 등뼈) 드롭이 아니라 재작성. 검수 기준은 *그 블록
+    텍스트를 못 비우므로(L2=서사 등뼈) 드롭이 아니라 재작성. 검수 기준은 *그 블록
     소재의 기록*이라 부풀림과 소재-자막 결속 끊김을 한 심판이 잡는다.
+
+    field — caption(모드 공통) | narration(모드 A 저작 작문; 자막 복사본은 제외).
+    only — 검수 대상 블록 제한(부분 저작이 채운 블록만 — **유저 텍스트는 검수
+    금지**, 유저는 자기 영상을 알고 우리 관찰이 틀릴 수 있다. 소유권 이진).
     """
     import ollama
     lines = _record_lines(ws, avail, profiles)
     entries = [(i, b, [s for s in (b.sources or []) if s in lines])
                for i, b in enumerate(plan.blocks)]
-    entries = [(i, b, srcs) for i, b, srcs in entries if b.caption and srcs]
+    entries = [(i, b, srcs) for i, b, srcs in entries
+               if getattr(b, field) and srcs and (only is None or i in only)
+               and not (field == "narration" and b.narration == b.caption)]
     if not entries:
         return
     by_idx = {i: (b, srcs) for i, b, srcs in entries}
+    label = "하단 자막(설명)" if field == "caption" else "목소리로 읽을 내레이션 문장"
 
     claims_cache: dict = {}             # 같은 자막의 주장 추출은 소스 수와 무관 1회
 
     def _sweep(idxs) -> list[int]:
-        # 소스별 각각 판정 — 자막은 그 블록의 *모든* 소스 클립 위에 뜨므로 하나라도
+        # 소스별 각각 판정 — 텍스트는 그 블록의 *모든* 소스 클립 위에 뜨므로 하나라도
         # 못 받치면 그 클립에서 화면 불일치다(simple-demo3 2차 실측: '밥' 자막이
         # 0195 클립 위에). 합본 기록 한 줄 판정은 희석돼 통과시킴(3회 실측) → 기각.
         return [i for i in idxs
-                if any(_caption_fabricated(by_idx[i][0].caption, lines[s],
+                if any(_caption_fabricated(getattr(by_idx[i][0], field), lines[s],
                                            claims_cache)
                        for s in by_idx[i][1])]
 
     def _rewrite(idxs, extra: str) -> None:
         rew = (
-            "다음 블록들의 하단 자막이 검수에서 '소재 기록에 없는 사실을 지어냄'"
+            f"다음 블록들의 {label}이 검수에서 '소재 기록에 없는 사실을 지어냄'"
             "으로 판정됐다. 각각 다시 써라.\n규칙: 그 블록 기록이 보여주는 것 "
             "안에서만 사실을 말하고, 기록에 물건·배경이 보인다는 이유로 사건을 "
-            "지어내지 마라. 블록에 소재가 여러 개면 자막은 그 *모두*에 맞아야 "
+            "지어내지 마라. 블록에 소재가 여러 개면 문장은 그 *모두*에 맞아야 "
             "한다 — 한 소재에만 있는 사실 대신 모두에 해당하는 것을 말하라. "
             "마땅한 사실이 없으면 장면 서술 대신 강아지의 감정·매력을 말하라. "
             f"{extra}한 문장, 1초당 {BUDGET_CPS:.0f}자 이내. 요청의 말투·호칭은 "
@@ -375,7 +391,7 @@ def _verify_captions(plan: EditPlan, request: str, ws: Workspace,
             caps = json.loads(r.message.content).get("captions") or []
         except json.JSONDecodeError:
             return
-        _apply_rewrites(plan, dict(zip(idxs, caps)), request)
+        _apply_rewrites(plan, dict(zip(idxs, caps)), request, field)
 
     # 라운드 1 = 증거 제한 재작성, 라운드 2 = 재판정 잔존만 감정 전용(사실 금지 —
     # 실측: 1차 재작성이 다른 한쪽 소스의 사실('문틈')로 도망). 그래도 남으면 경고.
@@ -391,19 +407,21 @@ def _verify_captions(plan: EditPlan, request: str, ws: Workspace,
               "저작 증거 프롬프트 점검 신호")
 
 
-def _apply_rewrites(plan: EditPlan, fixes: dict, request: str) -> None:
+def _apply_rewrites(plan: EditPlan, fixes: dict, request: str,
+                    field: str = "caption") -> None:
     """검수 재작성 병합(결정론) — 소독 후 교체, 재량 TTS(자막 그대로 읽기) 동기화."""
     for i, new in fixes.items():
         if not (isinstance(i, int) and 0 <= i < len(plan.blocks)):
             continue
         b = plan.blocks[i]
+        old = getattr(b, field)
         new = _clean_text(str(new or ""), request)
-        if not new or new == b.caption:
+        if not new or new == old:
             continue
-        print(f"     [검수] 블록{i} 자막 재작성: {b.caption!r} → {new!r}")
-        if b.narration and b.narration == b.caption:
-            b.narration = new
-        b.caption = new
+        print(f"     [검수] 블록{i} {field} 재작성: {old!r} → {new!r}")
+        if field == "caption" and b.narration and b.narration == b.caption:
+            b.narration = new               # 재량 TTS = 자막 그대로 읽기 동기화
+        setattr(b, field, new)
 
 
 def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
@@ -430,14 +448,22 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
         b.speed = 1.0
         if b.zoom == "gradual":
             b.subject = "foster"
-        # 재량 TTS = 화면 자막을 *그대로* 읽기 — narration 은 caption 의 결정론
-        # 복사(저작 출력의 자유 대본을 읽지 않아 대본 발명 축이 구조적으로 없다).
-        if voice_choice and d.get("voice") and b.caption:
-            b.narration = b.caption
+        # 읽는 자막(내레이션=자막)은 블록 내내 표시 — 저작 span 이 자막을 발화보다
+        # ~1초 늦춰 AV 스큐(simple-demo3 실측 2026-07-07). 동기가 저작 재량에 우선.
+        if b.narration and b.narration == b.caption:
+            b.caption_span = None
         blocks.append(b)
     blocks = [b for b in blocks if b.sources or b.select != "all" or b.caption or b.narration]
     if not blocks:
         return None
+    # 재량 TTS = *영상 단위* 장르 결정 — 읽으면 자막 있는 모든 블록, 아니면 전부
+    # 침묵(2026-07-07 체셔 "위화감": 블록별 on/off 는 내레이터 존재의 일관성을 깨
+    # 고장으로 들린다). 읽기는 자막 결정론 복사(대본 발명 축 없음) + span 동기.
+    if voice_choice and raw.get("voice"):
+        for b in blocks:
+            if b.caption:
+                b.narration = b.caption
+                b.caption_span = None
     title = _watch_echo(str(raw.get("title") or ""), request, "title")
     # 감탄(L3, texts) 소독 — 복창 감시 + 인덱스 클램프 + 상한 + **글자 계약**:
     # 공백 제외 LEVEL3_MAX_CHARS 초과는 자르지 않고 통째로 드롭(자르면 뜻이
@@ -569,14 +595,24 @@ def fill_plan(request: str, ws: Workspace, names: list[str],
             raw = json.loads(r.message.content)
         except json.JSONDecodeError:
             continue
-        _merge_fill(plan, raw, request, avail, narration, allow_caption)
+        filled = _merge_fill(plan, raw, request, avail, narration, allow_caption)
+        if filled:
+            # 부분 저작이 채운 자막도 저작 소유 → 같은 검수. only= 가 소유권 경계 —
+            # 유저가 쓴 자막은 검수 대상이 아니다(유저는 자기 영상을 안다).
+            try:
+                _verify_captions(plan, request, ws, avail, profiles,
+                                 only=set(filled))
+            except Exception as e:
+                print(f"     [검수] 건너뜀({type(e).__name__}: {e})")
         return plan
     return plan
 
 
 def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
-                narration: bool, allow_caption: bool) -> None:
-    """결정론 병합 — *빈 슬롯에만* 기입. 유저 명시 필드는 저작 출력에서 읽지 않는다."""
+                narration: bool, allow_caption: bool) -> list[int]:
+    """결정론 병합 — *빈 슬롯에만* 기입. 유저 명시 필드는 저작 출력에서 읽지 않는다.
+    반환 = 저작이 자막을 채운 블록 인덱스(검수 대상 경계)."""
+    filled_caps: list[int] = []
     for i, (b, d) in enumerate(zip(plan.blocks, raw.get("blocks") or [])):
         filled = []
         if not (b.keywords or b.sources):
@@ -591,6 +627,7 @@ def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
                     b.caption = cap        # L2 위치는 계약(하단) — pos 필드 없음
                     b.caption_span = EditBlock._clean_span(d.get("caption_span"))
                     filled.append(f"caption={cap!r}")
+                    filled_caps.append(i)
             if not b.target_dur:
                 dur = float(d.get("dur") or 0)
                 if dur > 0:
@@ -598,3 +635,4 @@ def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
                     filled.append(f"dur={b.target_dur:.0f}")
         if filled:
             print(f"     블록{i} ← {' '.join(filled)}")
+    return filled_caps
