@@ -601,17 +601,59 @@ def _boxes_out(clips: list[tuple[str, float, float]], ws: Workspace,
 
 def _auto_pos(text: str, clips, ws: Workspace, size: tuple[int, int],
               taken: tuple = (), style: str = "caption",
-              blocked: tuple = ()) -> str | None:
-    """auto 위치 확정 — 주인공 박스가 비는 8방위 선택(layout.pick_region).
+              blocked: tuple = (), order: tuple = None) -> str | None:
+    """auto 위치 확정 — 주인공 박스가 비는 영역 선택(layout.pick_region).
 
     위치는 구도의 사실이라 픽셀만 안다 — 저작은 auto 로 넘기고 여기서 결정론으로.
     taken = 같은 시간에 보이는 텍스트들의 영역 이름(같음·인접 충돌 제외, ADJACENT),
-    blocked = 이름 없는 동시 텍스트(피사체 옆 카피)의 rect 들.
+    blocked = 이름 없는 동시 텍스트(피사체 옆 배치)의 rect 들,
+    order = 후보 영역(L3 는 layout.L3_ORDER — top/bottom 밴드 제외).
     """
     W, H = size
-    rects = {p: _text_rect(text, W, H, p, style) for p in layout.AUTO_ORDER}
+    order = order or layout.AUTO_ORDER
+    rects = {p: _text_rect(text, W, H, p, style) for p in order}
     return layout.pick_region(rects, _boxes_out(clips, ws, W, H), list(taken),
-                              blocked=list(blocked))
+                              order=order, blocked=list(blocked))
+
+
+# 피크 판정 하한 — 프레임당 박스중심 이동/박스폭. 골든 실측(2026-07-07): 정지 소재
+# max 0.007 vs 놀이 소재 p50 0.026 — 0.02 가 3배 마진의 분리선. [잠정 n=2]
+_PEAK_MIN_V = 0.02
+_PEAK_MAX_GAP = 3    # 검출 공백 허용(프레임) — 그보다 벌어진 쌍은 속도 계산 제외
+
+
+def _peak_offset(blocks_clips: list, ws: Workspace) -> float | None:
+    """주인공 박스 속도(중심 이동/박스폭) 피크의 *출력 타임라인 절대 초* — L3 감탄의
+    등장 순간을 행동의 순간에 스냅(레벨 기획 2026-07-07: "폴짝!"은 점프 프레임에).
+
+    M3 곡선 재계산 없이 이미 로드된 박스로 산수만. xfade 블록은 경계 오프셋이
+    틀어져 제외(컷 전환만), 박스 희소·정적(피크<하한)이면 None(블록 시작 폴백).
+    blocks_clips = [(블록 출력 시작초, block, clips)] — 범위 내 생존 블록들.
+    """
+    best_v, best_t = 0.0, None
+    for start, b, clips in blocks_clips:
+        if b.transition != "cut" or b.zoom == "gradual" or b.speed != 1.0:
+            continue                        # 출력 시간 매핑이 산수로 안 떨어지는 연산
+        off = 0.0
+        for mp4, t0, t1 in clips:
+            boxes = _foster_boxes(Path(mp4).stem, ws)
+            prev = None                     # (frame_idx, cx, cy)
+            for i in range(int(t0 * _ANALYSIS_FPS), int(t1 * _ANALYSIS_FPS) + 1):
+                bx = boxes.get(i)
+                if bx is None:
+                    continue
+                cx, cy = (bx.x + bx.x2) / 2, (bx.y + bx.y2) / 2
+                if (prev is not None and bx.x2 > bx.x
+                        and i - prev[0] <= _PEAK_MAX_GAP):
+                    # 프레임 공백 정규화 — 공백 누적 이동을 순간 속도로 오인 방지
+                    v = ((abs(cx - prev[1]) + abs(cy - prev[2]))
+                         / ((bx.x2 - bx.x) * (i - prev[0])))
+                    if v > best_v:
+                        best_v = v
+                        best_t = start + off + (i / _ANALYSIS_FPS - t0)
+                prev = (i, cx, cy)
+            off += t1 - t0
+    return best_t if best_v >= _PEAK_MIN_V and best_t is not None else None
 
 
 def _text_png(text: str, W: int, H: int, out: Path, pos: str = "bottom",
@@ -713,11 +755,9 @@ def _overlay_text(src: Path, text: str, out: Path, size: tuple[int, int],
 # --------------------------------------------------------------------------- #
 def render_block(block: EditBlock, sources, tmp: Path, idx: int,
                  size=(768, 432), fps=30.0, exclude: set | None = None,
-                 ws: Workspace | None = None, avoid: tuple = ()):
+                 ws: Workspace | None = None):
     """블록 1개 렌더(클립선택 → 연산 → 전환 → 배속 → 자막).
     반환 (영상경로, 쓴 클립들, 확정 자막 pos|None). 클립 없으면 (None, [], None).
-
-    avoid = auto 배치에서 제외할 영역 이름들(전역 title 있으면 "top" — 호출부가 안다).
     """
     ws = ws or Workspace.dev()
     clips = compile_editlist(block, sources, ws, exclude)
@@ -737,10 +777,8 @@ def render_block(block: EditBlock, sources, tmp: Path, idx: int,
     if block.caption:                       # 블록별 자막을 그 블록에만 박는다
         cap = tmp / f"b{idx}_cap.mp4"
         cap_pos = block.caption_pos
-        if cap_pos == AUTO_POS:             # 저작 기본 — 주인공이 비는 영역으로
-            cap_pos = ("bottom" if block.zoom == "gradual"   # 줌은 투영이 안 맞음
-                       else _auto_pos(block.caption, clips, ws, size, avoid)
-                       or "bottom")         # 전 영역 충돌(이론상) → 관행 기본
+        if cap_pos == AUTO_POS:             # L2 계약 — 설명은 하단 고정(레벨 기획
+            cap_pos = "bottom"              # 2026-07-07: 자막의 미덕은 일관성, 로밍 제거)
         bd = _probe_dur(str(vid))
         win = (0.0, bd)                     # 창 명시 = 양끝 페이드 기준
         if block.caption_span:              # [비율] → 실측 블록 길이 기준 초
@@ -804,36 +842,50 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
                           t0 + (t1 - t0) * b.caption_span[1])
             placed.append((cap_pos, _text_rect(b.caption, W, H, cap_pos), (t0, t1)))
     cur = src
+    l3_windows: list[tuple] = []            # L3 동시 상한은 같은 레벨끼리만(레벨 계약)
     for k, tx in enumerate(plan.texts):
         sel = [(oi, b, c) for oi, b, c, _d, _p in infos
                if tx.blocks[0] <= oi <= tx.blocks[1]]
         if not sel:
-            print(f"  [카피] ⚠️ texts[{k}] 대상 블록 전멸 → 드롭: {tx.text[:20]!r}")
+            print(f"  [L3] ⚠️ texts[{k}] 대상 블록 전멸 → 드롭: {tx.text[:20]!r}")
             continue
         w0, w1 = bounds[sel[0][0]][0], bounds[sel[-1][0]][1]
-        # 동시 상한을 지키는 틈에 배치 — span 미지정은 읽을 만큼 보였다 사라짐.
-        win = layout.place_copy(w0, w1, tx.span, tx.text, [w for _, _, w in placed])
+        req = layout.required_secs(tx.text)
+        # 시간: ① 모션 피크 스냅(행동의 순간에 팝 — 레벨 기획의 심장) ② 틈 배치 폴백
+        anchor = ""
+        win = None
+        if tx.span is None:
+            peak = _peak_offset([(bounds[oi][0], b, c) for oi, b, c in sel], ws)
+            if peak is not None:
+                # 피크가 범위 끝에 몰리면(실측: 클립 마지막 프레임) 창을 앞으로
+                # 당겨 피크를 담는다 — 감탄이 행동 직전에 떠서 순간을 관통.
+                s0 = max(w0, min(peak, w1 - req))
+                cand = (s0, min(w1, s0 + req * layout.DWELL_FACTOR))
+                if (cand[1] - cand[0] + 1e-6 >= req and peak <= cand[1] + 1e-6
+                        and layout.fits_concurrency(cand, l3_windows)):
+                    win, anchor = cand, " ⚡피크"
         if win is None:
-            print(f"  [카피] ⚠️ texts[{k}] 동시 {layout.MAX_CONCURRENT}개 상한 안에서 "
-                  f"읽을 틈 없음({len(tx.text)}자, 범위 {w1 - w0:.1f}s) → 드롭: "
-                  f"{tx.text[:20]!r}")
+            win = layout.place_copy(w0, w1, tx.span, tx.text, l3_windows)
+        if win is None:
+            print(f"  [L3] ⚠️ texts[{k}] 동시 {layout.MAX_CONCURRENT}개 상한 안에서 "
+                  f"읽을 틈 없음(범위 {w1 - w0:.1f}s) → 드롭: {tx.text[:20]!r}")
             continue
         conc = [(n, r) for n, r, w in placed if min(w[1], win[1]) > max(w[0], win[0])]
         conc_names = [n for n, _ in conc if n]
         conc_rects = [r for _, r in conc]
-        # 구도 기준 = 카피가 *뜨는 순간*의 블록(줌 블록은 투영 불일치라 제외)
+        # 구도 기준 = 감탄이 *뜨는 순간*의 블록(줌 블록은 투영 불일치라 제외)
         ob, oclips = next(((b, c) for oi, b, c in sel
                            if bounds[oi][0] <= win[0] < bounds[oi][1] + 1e-6),
                           (sel[0][1], sel[0][2]))
         boxes = [] if ob.zoom == "gradual" else _boxes_out(oclips, ws, W, H)
-        pos, draw_block, rect = tx.pos, None, None
-        if pos != AUTO_POS:                 # 저작 명시 자리 — 충돌 없을 때만 존중
-            rect = _text_rect(tx.text, W, H, pos, "copy")
-            if (any(layout.conflicts(pos, n) for n in conc_names)
+        # 자리: ① 피사체 옆(편집자 관행) → ② L3 무대(중간 밴드) 폴백 → ③ 드롭
+        pos, draw_block, rect = AUTO_POS, None, None
+        if tx.pos in layout.L3_ORDER:       # 명시 자리 — L3 무대 안에서만 존중
+            rect = _text_rect(tx.text, W, H, tx.pos, "copy")
+            if not (any(layout.conflicts(tx.pos, n) for n in conc_names)
                     or any(layout.rect_overlap(rect, r) > 0 for r in conc_rects)):
-                pos = AUTO_POS
+                pos = tx.pos
         if pos == AUTO_POS:
-            # ① 피사체 옆(편집자 관행) → ② 빈 영역 폴백 → ③ 자리 없으면 드롭
             beside = _beside_subject(tx.text, boxes, W, H)
             if (beside and layout.occupancy(beside[1], boxes) <= layout.OCC_MAX
                     and not any(layout.rect_overlap(beside[1], r) > 0
@@ -843,9 +895,10 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
                 clips_all = [cl for _oi, b2, c in sel
                              if b2.zoom != "gradual" for cl in c]
                 pos = _auto_pos(tx.text, clips_all, ws, size, taken=conc_names,
-                                style="copy", blocked=conc_rects)
+                                style="copy", blocked=conc_rects,
+                                order=layout.L3_ORDER)
                 if pos is None:
-                    print(f"  [카피] ⚠️ texts[{k}] 충돌 없는 자리 없음 → 드롭: "
+                    print(f"  [L3] ⚠️ texts[{k}] 충돌 없는 자리 없음 → 드롭: "
                           f"{tx.text[:20]!r}")
                     continue
                 rect = _text_rect(tx.text, W, H, pos, "copy")
@@ -853,8 +906,9 @@ def _burn_plan_texts(src: Path, plan: EditPlan, infos: list, out: Path,
         _overlay_text(cur, tx.text, nxt, size, pos=(pos or "bottom"), window=win,
                       style="copy", block=draw_block)
         placed.append((pos, rect, win))
+        l3_windows.append(win)
         cur = nxt
-        print(f"  [카피] texts[{k}] @{pos or '피사체 옆'} "
+        print(f"  [L3] texts[{k}] @{pos or '피사체 옆'}{anchor} "
               f"{win[0]:.1f}~{win[1]:.1f}s: {tx.text!r}")
     Path(cur).replace(out)
 
@@ -866,13 +920,12 @@ def render_plan(plan: EditPlan, sources, out_path: str, size=(768, 432), fps=30.
     ws = ws or Workspace.dev()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     allowed = allowed_sources_per_block(plan, sources, ws)
-    avoid = ("top",) if plan.title else ()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         block_vids, used, infos = [], set(), []
         for idx, block in enumerate(plan.blocks):
             bv, clips, cap_pos = render_block(block, allowed[idx], tmp, idx, size, fps,
-                                              exclude=used, ws=ws, avoid=avoid)
+                                              exclude=used, ws=ws)
             if bv is not None:
                 d = _probe_dur(str(bv))
                 block_vids.append((bv, d))

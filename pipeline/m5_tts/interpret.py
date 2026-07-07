@@ -40,6 +40,19 @@ def pin_mode(request: str) -> str | None:
     return None
 
 
+def voice_discretion_allowed(mode: str, auto_routed: bool, request: str) -> bool:
+    """저작 재량 TTS 게이트 — **TTS 소유권 이진**(2026-07-07 사용자 확정).
+
+    유저가 TTS 를 어느 방향으로든 언급했으면(넣어달라=모드 A / 빼달라=부정 핀 /
+    카드 선택) TTS 는 유저 영역 — 저작은 목소리에 아예 관여 금지. 재량은
+    *TTS 무언급*(핀 없음 + 자동 라우팅 edit)일 때만 열린다. 텍스트 소유권
+    이진("지시가 하나라도 있으면 저작은 아예 없음")의 TTS 판.
+    auto_routed=False(meta.mode 기존재 = 카드/수동/구버전 잡) 는 출처 불명이라
+    보수적으로 유저 결정으로 취급한다.
+    """
+    return mode == "edit" and auto_routed and pin_mode(request) is None
+
+
 def decide_mode(request: str) -> tuple[str, float]:
     """(mode, confidence). mode ∈ narration|edit|uncertain."""
     pinned = pin_mode(request)

@@ -72,7 +72,8 @@ class _FakeOllama(types.ModuleType):
         self.prompts: list[str] = []
         self.opts: list[dict] = []
 
-    def chat(self, model, messages, options, format, think):  # noqa: A002
+    def chat(self, model, messages, options, format=None, think=False,
+             **kw):  # noqa: A002 — 검수(logprobs 등) 추가 키워드 허용
         self.prompts.append(messages[0]["content"])
         self.opts.append(options)
         return types.SimpleNamespace(
@@ -142,11 +143,11 @@ def test_author_plan_retries_on_textless(monkeypatch, tmp_path):
                                        "dur": 5, "caption": ""}]})
     good = json.dumps({"blocks": [{"sources": ["IMG_A"], "select": "all",
                                    "dur": 5, "caption": "안녕 토리"}]})
-    fake = _FakeOllama([textless, good])
+    fake = _FakeOllama([textless, good, json.dumps({"bad": []})])
     monkeypatch.setitem(sys.modules, "ollama", fake)
     plan = author_plan("소개 영상", ws, names, narration=False)
     assert plan is not None and plan.blocks[0].caption == "안녕 토리"
-    assert len(fake.prompts) == 2                      # 1차 기각 → 재추첨
+    assert len(fake.prompts) == 3          # 1차 기각 → 재추첨 → 자막 검수(무혐의)
 
 
 # ── 부분 저작 (그라디언트 — 유저 뼈대 불변, 빈 필드만 병합) ────────────────

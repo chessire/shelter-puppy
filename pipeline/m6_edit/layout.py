@@ -82,8 +82,19 @@ def required_secs(text: str, cps: float = READ_CPS,
 # 뜬 순간은 딱 좋았음 — 상시는 title 의 몫). [잠정 — 취향 배터리로 보정]
 DWELL_FACTOR = 2.0
 
-# 동시 표시 상한(title 포함) — "한번에 세 개 이상은 안 되겠다"(2026-07-06 사용자 확정).
-MAX_CONCURRENT = 2
+# ── 텍스트 Level 계약(2026-07-07 사용자 확정) ──────────────────────────────
+# 화면 글은 3계층 — 계층마다 문법이 다르다(같은 문법을 쓰는 게 어색함의 병인):
+#   L1 제목   : 영상 전체 1개 · top 전용 · 오프닝 체류(TITLE_DWELL_FACTOR) 후 소멸
+#   L2 설명   : 동시 1(블록 순차 = 구조적) · bottom 전용 고정(자막의 미덕은 일관성
+#               — 로밍 제거) · 블록과 함께 삶 · 재량 TTS 가 읽는 유일한 계층
+#   L3 감탄   : 동시 ≤2 · 중간 무대(피사체 옆 우선, top/bottom 밴드 제외) ·
+#               짧은 체류(DWELL_FACTOR) · 공백 제외 8자 이하 · 모션 피크에 등장
+# 구 전역 동시 상한 2(07-06)는 이 레벨별 계약으로 개정 — 병인이 읽기 부하였고
+# L3(≤8자)는 문장이 아니라 시각 요소라 부하가 없다. 밀도는 인접 금지가 통제.
+MAX_CONCURRENT = 2            # place_copy 의 겹침 산수 상수(이제 L3 끼리에만 적용)
+LEVEL3_MAX_CHARS = 8          # 공백 제외 — 초과는 자르지 않고 드롭(자르면 뜻이 깨짐)
+L3_ORDER = ("left", "right", "top-left", "bottom-left", "bottom-right")
+# (top=L1 밴드, bottom=L2 밴드 — L3 후보에서 원천 제외. top-right=AI 배지 상주.)
 
 # title 체류 배수 — title 도 상시가 아니라 소멸(2026-07-06 사용자 확정). 카피(2.0)보다
 # 눈에 띄게 길게: title 은 문패라 위계가 높고, 인트로에선 자막을 먼저 읽고 title 로
@@ -165,15 +176,21 @@ def _free(rng: tuple, busy: list[tuple]) -> list[tuple]:
     return free
 
 
+def fits_concurrency(win: tuple, windows: list[tuple],
+                     k: int = MAX_CONCURRENT) -> bool:
+    """win 을 얹어도 동시 k 를 안 넘나 — win 이 '이미 k개' 구간과 무겹침이면 참."""
+    return not any(min(b1, win[1]) > max(b0, win[0])
+                   for b0, b1 in _busy(windows, k))
+
+
 def place_copy(w0: float, w1: float, span: list | None, text: str,
                windows: list[tuple]) -> tuple[float, float] | None:
-    """카피 표시창 — 동시 상한(MAX_CONCURRENT)을 지키는 틈에 배치.
+    """L3 감탄 표시창 — 같은 레벨(L3) 동시 상한을 지키는 틈에 배치.
 
-    windows = 이미 확정된 텍스트들(title·자막·선행 카피)의 표시창. 카피는 보조라
-    항상 양보하는 쪽(핀 예약과 같은 결 — 아는 것의 우선권을 결정론으로 보장).
-    ①span 명시 → 그 창과 자유 조각의 교집합에서 읽을 수 있는 첫 조각
-    ②미지정/실패 → 가장 이른 자유 조각에서 읽기 시간 × DWELL_FACTOR 만
-      "보였다 사라짐"(상시는 title 의 몫). 틈이 없으면 None(호출부 경고 드롭).
+    windows = 이미 확정된 *L3* 표시창들(레벨 계약 — L1/L2 는 밴드가 달라 개수
+    경쟁이 없다). ①span 명시 → 그 창과 자유 조각의 교집합에서 읽을 수 있는 첫
+    조각 ②미지정/실패 → 가장 이른 자유 조각에서 읽기 시간 × DWELL_FACTOR 만
+    "보였다 사라짐". 틈이 없으면 None(호출부 경고 드롭).
     """
     req = required_secs(text)
     free = _free((w0, w1), _busy(windows))

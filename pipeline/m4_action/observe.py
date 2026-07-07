@@ -340,6 +340,46 @@ def caption(analysis_mp4: str | Path) -> str:
         return ""
 
 
+# 행동 관찰은 캡션(장소·환경)보다 시간 문맥이 필요해 프레임을 더 촘촘히 뽑는다.
+_BEHAVIOR_FRACS = (0.1, 0.3, 0.5, 0.7, 0.9)
+_BEHAVIOR_SCHEMA = {"type": "object",
+                    "properties": {"behavior": {"type": "string"}},
+                    "required": ["behavior"]}
+
+
+def behavior(analysis_mp4: str | Path) -> str:
+    """대상의 행동·상호작용 관찰(사용자 제안 2026-07-07) — 자막 환각의 근치.
+
+    캡션은 장소·환경 축이라 '식기 주변에서 움직임'까지만 말한다 → 저작·검수가
+    '밥 먹기'를 중재해야 했다(simple-demo3 3연속 사고). 행동 축이 '뒤엉켜 장난치며
+    놀고 있음'이라고 말해주면 저작은 진짜 소재를 얻고 검수는 반증을 얻는다
+    (스파이크 4/4: 놀이·앞발 내밀기·고양이 앞 멈춤·목줄 질주 정확, 지어냄 0).
+    ⚠️ profile_text(장면 매칭 입력)에는 넣지 않는다 — 골든 5/6 회귀 없이 저작·검수
+    기록(author._record_lines)에만 합류. 매칭 합류는 골든 재채점과 함께 별도 실험.
+    """
+    import ollama
+    jpegs = []
+    for fr in _sample_frames(str(analysis_mp4), _BEHAVIOR_FRACS):
+        ok, buf = cv2.imencode(".jpg", fr)
+        if ok:
+            jpegs.append(buf.tobytes())
+    if not jpegs:
+        return ""
+    prompt = ("한 강아지 영상에서 시간순으로 뽑은 프레임들이다. 강아지(들)의 "
+              "행동과 상호작용(사람·다른 동물·물건과 무엇을 하는지)을 보이는 "
+              "것만 한국어 1~2문장으로 서술하라. 흔히 연상되는 행동이라도 "
+              "프레임에 보이지 않으면 적지 마라.")
+    r = ollama.chat(model=MODEL,
+                    messages=[{"role": "user", "content": prompt, "images": jpegs}],
+                    options={"temperature": 0, "num_predict": 200,
+                             "repeat_penalty": 1.3},
+                    format=_BEHAVIOR_SCHEMA, think=False)
+    try:
+        return json.loads(r.message.content).get("behavior", "").strip()
+    except json.JSONDecodeError:
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # 프로필 빌드 + meta 캐시
 # --------------------------------------------------------------------------- #
@@ -378,13 +418,18 @@ def _sensor_profile(ws: Workspace, name: str) -> dict:
 
 
 def build_profile(ws: Workspace, name: str) -> dict:
-    """영상 1개의 관찰 프로필(센서 4축 + 캡션). 축별 실패는 삼키고 빈 관찰."""
+    """영상 1개의 관찰 프로필(센서 4축 + 캡션 + 행동). 축별 실패는 삼키고 빈 관찰."""
     prof = _sensor_profile(ws, name)
     try:
         prof["caption"] = caption(ws.analysis(name))
     except Exception as e:                    # noqa: BLE001
         print(f"     [관찰] {name} 캡션 실패: {e}")
         prof["caption"] = ""
+    try:
+        prof["behavior"] = behavior(ws.analysis(name))
+    except Exception as e:                    # noqa: BLE001
+        print(f"     [관찰] {name} 행동 실패: {e}")
+        prof["behavior"] = ""
     return prof
 
 
@@ -405,14 +450,20 @@ def ensure_profiles(ws: Workspace, names: list[str]) -> dict[str, dict]:
         with ThreadPoolExecutor(max_workers=min(4, len(todo))) as pool:
             futs = {n: pool.submit(_sensor_profile, ws, n) for n in todo}
             for name in todo:
-                print(f"[관찰] {name} 프로필(오디오·장면·휘도·캡션)…")
+                print(f"[관찰] {name} 프로필(오디오·장면·휘도·캡션·행동)…")
                 try:
                     cap_txt = caption(ws.analysis(name))
                 except Exception as e:        # noqa: BLE001
                     print(f"     [관찰] {name} 캡션 실패: {e}")
                     cap_txt = ""
+                try:
+                    beh_txt = behavior(ws.analysis(name))
+                except Exception as e:        # noqa: BLE001
+                    print(f"     [관찰] {name} 행동 실패: {e}")
+                    beh_txt = ""
                 prof = futs[name].result()
                 prof["caption"] = cap_txt
+                prof["behavior"] = beh_txt
                 profiles[name] = prof
                 print(f"     {profile_text(prof)}")
         print(f"[시간] 관찰 프로필 {len(todo)}영상 {time.time() - t0:.1f}s")
@@ -427,6 +478,13 @@ def ensure_profiles(ws: Workspace, names: list[str]) -> dict[str, dict]:
             dirty = True
         if "scene_vec" not in prof:
             prof["scene_vec"] = scene_vec(ws, name)
+            dirty = True
+        if "behavior" not in prof:            # 구캐시 마이그레이션(잡당 1회, ~3s/영상)
+            try:
+                prof["behavior"] = behavior(ws.analysis(name))
+            except Exception as e:            # noqa: BLE001
+                print(f"     [관찰] {name} 행동 실패: {e}")
+                prof["behavior"] = ""
             dirty = True
     if dirty:
         ws.update_meta(scene_profile=profiles)

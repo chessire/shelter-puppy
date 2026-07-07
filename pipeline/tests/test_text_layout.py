@@ -142,13 +142,46 @@ def test_title_window_dwell_and_cap():
     assert layout.title_window("토리", 3.0) == (0.0, 3.0)   # 영상보다 길면 전체
 
 
-def test_title_departure_frees_copy_slot():
-    # title(0~4.5s) + 상시 자막(블록마다) 상황 — title 이 떠난 뒤 자막 1개뿐인
-    # 구간이 생기고, 카피는 거기 들어간다(자막 span 없이도 카피가 사는 이유).
-    title_w = layout.title_window("토리", 10.0)
-    windows = [title_w, (0.0, 5.0), (5.0, 10.0)]    # title + 블록0·1 자막(상시)
-    win = layout.place_copy(0.0, 10.0, None, "심쿵 주의보!", windows)
-    assert win is not None and abs(win[0] - title_w[1]) < 1e-9
+def test_level3_concurrency_is_within_level():
+    # 레벨 계약: L3 동시 상한은 같은 레벨끼리만 — L3 창 2개가 겹치는 구간은 회피
+    l3 = [(0.0, 3.0), (1.0, 4.0)]                   # 1~3s 에 L3 두 개
+    win = layout.place_copy(0.0, 10.0, None, "폴짝!", l3)
+    assert win is not None and win[0] >= 3.0 - 1e-9  # 세 번째는 겹침 해소 후
+    assert layout.fits_concurrency((5.0, 6.0), l3)
+    assert not layout.fits_concurrency((1.5, 2.5), l3)
+
+
+def test_l3_order_excludes_bands():
+    # L3 무대는 중간 밴드 — top(L1)·bottom(L2)·top-right(배지)는 후보에 없다
+    assert "top" not in layout.L3_ORDER
+    assert "bottom" not in layout.L3_ORDER
+    assert "top-right" not in layout.L3_ORDER
+
+
+def test_peak_offset_snaps_to_jump_moment():
+    import types
+    from pipeline.m6_edit import EditBlock
+    from pipeline.m6_edit.run import _foster_cache, _peak_offset
+    from pipeline.workspace import Workspace
+    ws = Workspace.dev()
+    def box(cx):
+        return types.SimpleNamespace(x=cx - 50, y=500, x2=cx + 50, y2=600)
+    # 프레임 0~90: 정지(중심 400) → 프레임 45~60 사이 프레임당 30px 질주 → 정지
+    boxes = {}
+    cx = 400.0
+    for i in range(91):
+        if 45 <= i < 60:
+            cx += 30.0
+        boxes[i] = box(cx)
+    _foster_cache[(str(ws.root), "FAKE_PEAK")] = boxes
+    clips = [("/fake/FAKE_PEAK.mp4", 0.0, 3.0)]
+    peak = _peak_offset([(10.0, EditBlock(), clips)], ws)
+    assert peak is not None
+    assert 10.0 + 45 / 30 - 0.1 <= peak <= 10.0 + 60 / 30 + 0.1   # 질주 창 안
+    # 정지 소재(이동 0) → None(블록 시작 폴백)
+    _foster_cache[(str(ws.root), "FAKE_STILL")] = {i: box(400) for i in range(91)}
+    assert _peak_offset([(0.0, EditBlock(),
+                          [("/fake/FAKE_STILL.mp4", 0.0, 3.0)])], ws) is None
 
 
 # ── PlanText 소독 ──────────────────────────────────────────────────────────
@@ -220,30 +253,90 @@ def test_to_plan_no_texts_when_caption_forbidden():
     assert plan is not None and plan.texts == []
 
 
-def test_to_plan_author_caption_defaults_auto():
-    plan = _to_plan(_raw([]), "요청", ["a", "b"], narration=False)
-    assert all(b.caption_pos == AUTO_POS for b in plan.blocks)
-
-
-def test_to_plan_demotes_collisions_with_fixtures():
-    # 상시 요소 충돌 소독 — title 있으면 top·top-left(인접), 항상 top-right → auto
+def test_to_plan_caption_is_level2_bottom():
+    # 레벨 계약(2026-07-07): L2 설명은 하단 고정 — 저작 출력에 위치 필드가 없고,
+    # raw 에 위치가 끼어 있어도 읽지 않는다(일관성이 자막의 미덕, 로밍 제거).
     raw = _raw([{"text": "카피", "blocks": [0, 1], "pos": "top"}])
     raw["title"] = "제목"
     raw["blocks"][0]["caption_pos"] = "top-left"
-    raw["blocks"][1]["caption_pos"] = "top-right"
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False)
-    assert plan.blocks[0].caption_pos == AUTO_POS
-    assert plan.blocks[1].caption_pos == AUTO_POS
-    assert plan.texts[0].pos == AUTO_POS
+    assert all(b.caption_pos == "bottom" for b in plan.blocks)
+    assert plan.texts[0].pos == AUTO_POS            # L3 자리도 렌더러 몫
 
 
-def test_to_plan_keeps_safe_explicit_pos():
-    raw = _raw([])                                  # title 없음 → top 은 재량으로 허용
-    raw["blocks"][0]["caption_pos"] = "top"
-    raw["blocks"][1]["caption_pos"] = "bottom-left"
+def test_to_plan_level3_char_contract():
+    # L3 감탄: 공백 제외 8자 초과는 자르지 않고 통째로 드롭
+    raw = _raw([{"text": "폴짝 폴짝 정말 신난다!", "blocks": [0, 0]},  # 비공백 10자 → 드롭
+                {"text": "심쿵 주의보!", "blocks": [0, 1]}])           # 비공백 6자 → 유지
     plan = _to_plan(raw, "요청", ["a", "b"], narration=False)
-    assert plan.blocks[0].caption_pos == "top"
-    assert plan.blocks[1].caption_pos == "bottom-left"
+    assert [t.text for t in plan.texts] == ["심쿵 주의보!"]
+
+
+# ── 저작 재량 TTS (TTS 소유권 이진, 2026-07-07) ─────────────────────────────
+
+def test_voice_discretion_gate():
+    from pipeline.m5_tts.interpret import voice_discretion_allowed
+    # TTS 무언급 + 자동 라우팅 edit → 재량 열림
+    assert voice_discretion_allowed("edit", True, "우리 토리 소개 영상 만들어줘")
+    # 유저가 목소리를 언급하면 방향 불문 꺼짐(긍정 핀=모드 A, 부정 핀=거부)
+    assert not voice_discretion_allowed("edit", True, "음성 없이 만들어줘")
+    assert not voice_discretion_allowed("narration", True, "대본 읽어줘")
+    # 카드/수동/구버전 잡(출처 불명) → 유저 결정 취급, 꺼짐
+    assert not voice_discretion_allowed("edit", False, "우리 토리 소개 영상 만들어줘")
+
+
+def test_to_plan_voice_reads_caption_verbatim():
+    raw = _raw([])
+    raw["blocks"][0]["voice"] = True
+    raw["blocks"][1]["voice"] = False
+    plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
+    assert plan.blocks[0].narration == plan.blocks[0].caption == "블록 자막"
+    assert plan.blocks[1].narration == ""
+
+
+def test_to_plan_voice_ignored_without_choice():
+    # 게이트 닫힘(유저가 TTS 언급) — voice 출력이 있어도 읽지 않는다
+    raw = _raw([])
+    raw["blocks"][0]["voice"] = True
+    plan = _to_plan(raw, "요청", ["a", "b"], narration=False)
+    assert all(not b.narration for b in plan.blocks)
+
+
+def test_to_plan_voice_needs_caption():
+    raw = _raw([])
+    raw["blocks"][0]["caption"] = ""
+    raw["blocks"][0]["voice"] = True
+    plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
+    assert plan.blocks[0].narration == ""
+
+
+def test_to_plan_voice_moderates_texts():
+    raw = _raw([{"text": "카피1", "blocks": [0, 0]},
+                {"text": "카피2", "blocks": [1, 1]}])
+    raw["blocks"][0]["voice"] = True
+    plan = _to_plan(raw, "요청", ["a", "b"], narration=False, voice_choice=True)
+    assert len(plan.texts) == 1                     # 목소리 켜면 화면 글 절제
+
+
+# ── 자막 사실 검수(프루닝 레시피의 자막판) — 결정론 병합부만 ────────────────
+
+def test_apply_rewrites_merges_and_syncs_voice():
+    from pipeline.m6_edit.author import _apply_rewrites
+    plan = _to_plan(_raw([]), "요청", ["a", "b"], narration=False)
+    plan.blocks[0].narration = plan.blocks[0].caption      # 재량 TTS(그대로 읽기)
+    _apply_rewrites(plan, {0: "기록 범위의 새 자막", 1: ""}, "요청")
+    assert plan.blocks[0].caption == "기록 범위의 새 자막"
+    assert plan.blocks[0].narration == "기록 범위의 새 자막"  # 읽기 동기화
+    assert plan.blocks[1].caption == "둘째 자막"             # 빈 재작성 = 무시
+
+
+def test_apply_rewrites_sanitizes_and_bounds():
+    from pipeline.m6_edit.author import _apply_rewrites
+    req = "우리 토리 소개 영상 만들어줘"
+    plan = _to_plan(_raw([]), req, ["a", "b"], narration=False)
+    old = plan.blocks[0].caption
+    _apply_rewrites(plan, {0: req, 7: "범위 밖", "x": "비정수"}, req)
+    assert plan.blocks[0].caption == old                    # 복창 재작성 = 소독 후 무시
 
 
 # ── 렌더러 기하(단일 출처) ──────────────────────────────────────────────────

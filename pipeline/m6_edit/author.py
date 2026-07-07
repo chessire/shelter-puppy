@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 import re
 
-from . import AUTO_POS, TEXT_POSITIONS, EditBlock, EditPlan, PlanText
-from .layout import READ_CPS
+from . import AUTO_POS, EditBlock, EditPlan, PlanText
+from .layout import LEVEL3_MAX_CHARS, READ_CPS
 from ..workspace import Workspace
 
 MODEL = "gemma4:26b-a4b-it-q4_K_M"
@@ -109,35 +109,49 @@ def caption_forbidden(request: str) -> bool:
     return any(p in low for p in _NO_TEXT_PINS)
 
 
-def _records(ws: Workspace, avail: list[str], profiles: dict) -> str:
-    """소재 관찰 기록(작가 입력). 길이는 실측 관찰 — 없으면 작가가 2초짜리 영상을
-    두 블록에 배치하는 실수를 한다(실측: 인트로·엔딩에 같은 2.3초 소재)."""
+def _record_lines(ws: Workspace, avail: list[str], profiles: dict) -> dict:
+    """소재별 관찰 기록 한 줄 — 작가 입력(_records)과 자막 검수(_verify_captions)의
+    단일 출처. 길이는 실측 관찰 — 없으면 작가가 2초짜리 영상을 두 블록에 배치하는
+    실수를 한다(실측: 인트로·엔딩에 같은 2.3초 소재). 확정 장면 태그(사람+자동,
+    데이터이지 상수 아님)도 합류 — 없으면 검수가 근거 있는 자막을 오탐한다
+    (실측: 목줄+야외 기록만으로는 '산책' 자막이 지어냄 판정)."""
     from ..m4_action.observe import motion_summary, profile_text
     from .run import _probe_dur
-    return "\n".join(
-        f"[{n}] 길이 {max(_probe_dur(str(ws.analysis(n))), 0):.0f}초 | "
-        f"{profile_text(profiles[n], motion_summary(ws, n))}"
-        for n in avail)
+    tags = ws.scene_tags()
+    # 행동 관찰(behavior)은 저작·검수 기록에만 합류 — profile_text(장면 매칭 입력)에
+    # 넣으면 골든 5/6 재채점이 필요해진다(observe.behavior 주석 참고).
+    return {n: (f"[{n}] 길이 {max(_probe_dur(str(ws.analysis(n))), 0):.0f}초 | "
+                f"{profile_text(profiles[n], motion_summary(ws, n))}"
+                + (f" | 행동: {profiles[n]['behavior']}"
+                   if profiles[n].get("behavior") else "")
+                + (f" | 확정 장면: {', '.join(sorted(tags[n]))}"
+                   if tags.get(n) else ""))
+            for n in avail}
 
 
-def _schema(names: list[str]) -> dict:
-    pos_enum = list(TEXT_POSITIONS) + [AUTO_POS]   # 저작만 auto 허용(번역 enum 은 8방위)
+def _records(ws: Workspace, avail: list[str], profiles: dict) -> str:
+    return "\n".join(_record_lines(ws, avail, profiles).values())
+
+
+def _schema(names: list[str], voice_choice: bool = False) -> dict:
+    # 레벨 계약(2026-07-07): L2 위치(하단)·L3 자리/순간(피사체 옆·모션 피크)은
+    # 렌더러 몫 — 저작 출력에서 위치·타이밍 필드를 제거(재량 축소 = 실패 모드 축소).
     block = {"type": "object", "properties": {
         "sources": {"type": "array", "items": {"enum": names}},
         "select": {"type": "string", "enum": ["dynamic", "static", "all", "묘기"]},
         "dur": {"type": "number"},
         "zoom": {"type": "string", "enum": ["none", "gradual"]},
         "caption": {"type": "string"},
-        "caption_pos": {"type": "string", "enum": pos_enum},
         "caption_span": {"type": "array", "items": {"type": "number"}},
         "narration": {"type": "string"},
     }, "required": ["sources", "select", "dur", "caption"]}   # dur 필수 — 미기입 시
     # 블록이 pace 기본값(컷당 2초)으로 흘러 총 길이가 목표 미달(실측 12.2s)
+    if voice_choice:                    # 재량 TTS — 필수화(dur 미기입 습성과 같은 방어)
+        block["properties"]["voice"] = {"type": "boolean"}
+        block["required"] = block["required"] + ["voice"]
     text = {"type": "object", "properties": {
         "text": {"type": "string"},
         "blocks": {"type": "array", "items": {"type": "integer"}},
-        "pos": {"type": "string", "enum": pos_enum},
-        "span": {"type": "array", "items": {"type": "number"}},
     }, "required": ["text", "blocks"]}
     return {"type": "object",
             "properties": {"title": {"type": "string"},
@@ -147,8 +161,15 @@ def _schema(names: list[str]) -> dict:
 
 
 def author_plan(request: str, ws: Workspace, names: list[str],
-                narration: bool) -> EditPlan | None:
-    """요청 + 관찰 프로필 → 저작 EditPlan. 실패(빈 블록 등)면 None(호출부 폴백)."""
+                narration: bool, voice_choice: bool = False) -> EditPlan | None:
+    """요청 + 관찰 프로필 → 저작 EditPlan. 실패(빈 블록 등)면 None(호출부 폴백).
+
+    voice_choice — 저작 재량 TTS(2026-07-07 사용자): TTS *무언급* 요청에서만
+    (voice_discretion_allowed 게이트) 저작이 블록별로 "자막을 목소리로 읽을지"를
+    고른다. 새 대본을 짓는 게 아니라 **화면 자막을 그대로 읽는다**(narration :=
+    caption 결정론 복사 — 대본 발명 축 원천 차단). 유저가 TTS 를 언급하면(모드 A·
+    부정 핀·카드) 이 재량은 완전히 꺼진다 — TTS 소유권 이진.
+    """
     import ollama
     from ..m4_action.observe import ensure_profiles
     profiles = ensure_profiles(ws, names)
@@ -170,40 +191,42 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         f"고객 요청: {request}\n\n"
         f"소재(영상별 관찰 기록 — 기계 측정이라 오류 가능):\n{records}\n\n"
         "이 소재들만으로 요청의 목적에 맞는 세로 숏폼(총 20~35초)을 기획하라. "
-        "구성(흐름·순서·분위기)은 네가 정한다. 시간 순서대로 블록 3~6개, 각 블록:\n"
+        "구성(흐름·순서·분위기)은 네가 정한다.\n"
+        "화면 글은 3계층이다 — 제목 title(전체 1개, 상단), 설명 caption(장면당 "
+        "한 문장, 하단), 감탄 texts(순간의 짧은 외침, 화면 중간). 계층을 섞지 "
+        "마라: 문장은 caption 에만, 감탄은 texts 에만.\n"
+        "시간 순서대로 블록 3~6개, 각 블록:\n"
         "- sources: 그 블록에 어울리는 소재 이름 1~3개(관찰 기록을 근거로 고른다)\n"
         "- select: 그 소재에서 쓸 구간 — 활발한 움직임=dynamic, 차분함=static, "
         "재주 장면=묘기, 무관=all\n"
         "- dur: 블록 길이(초, 3~10)\n"
         "- zoom: 얼굴·첫인상을 천천히 당겨 보여줄 블록만 gradual(차분한 구간에서), "
         "아니면 none\n"
-        "- caption: 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
-        "문장으로 써라(요청문을 옮겨 적지 마라). 강아지 이름과 고객의 말투는 "
-        "따른다. 매 블록 반드시 채운다(빈 문자열 금지) — 단 texts 카피가 그 "
-        "블록 구간을 덮으면 비워도 된다(화면의 글은 동시에 2개까지). 자막은 "
+        "- caption: 이 장면의 설명(Level 2) — 하단 자막 한 문장. 영상을 *보는 "
+        "사람*에게 말하는 새 문장으로 써라(요청문을 옮겨 적지 마라). 강아지 "
+        "이름과 고객의 말투는 따른다. 매 블록 반드시 채운다(빈 문자열 금지). "
         f"눈으로 읽는 글이다 — 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라"
-        f"(예: 5초 블록 ≤ {BUDGET_CPS * 5:.0f}자). 길면 문장을 줄여라.\n"
-        "- caption_pos: 기본 auto — 렌더러가 강아지를 가리지 않는 빈 자리를 "
-        "자동으로 고른다(너는 화면을 못 보므로 auto 가 안전하다). 특별한 연출 "
-        "의도가 있을 때만 8방위(bottom/top/left/right/top-left/top-right/"
-        "bottom-left/bottom-right) 지정. 우상단(top-right)엔 AI 표시가 있고, "
-        "title 을 채웠으면 top 과 그 옆 구석도 title 자리다 — 쓰지 마라. 붙은 "
-        "자리(top 과 top-left 처럼 이웃)는 같은 시간에 함께 쓰지 마라.\n"
+        f"(예: 5초 블록 ≤ {BUDGET_CPS * 5:.0f}자). 길면 문장을 줄여라. "
+        "**사실 주장은 그 블록 소재의 관찰 기록이 보여주는 범위까지만** — 기록에 "
+        "물건·배경이 보인다는 이유로 그와 관련된 사건·행동을 지어내지 마라. "
+        "기록이 뒷받침하지 않으면 장면 서술 대신 강아지의 감정·매력을 말하라.\n"
         "- caption_span: 자막이 장면에 맞춰 떴다 사라지게 하고 싶으면 블록 길이 "
         "대비 [시작,끝] 0~1 비율(예: [0.2,0.8]), 내내 표시면 생략\n"
-        "- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
-        "- title: 화면에 박을 *영상 자체의* 짧은 제목(요청문을 설명하는 '~만들기' "
-        "같은 문구가 아니다), 필요 없으면 빈 문자열\n"
-        "- (선택) 최상위 texts: *장면 여러 개에 걸치는* 카피 — 한 문장이 "
-        "블록 하나로는 못 읽을 만큼 길거나, 블록 자막과 별도 위치에 동시에 "
-        "보여줄 보조 카피면 블록 caption 대신 여기에. "
-        "{text, blocks:[시작,끝 블록 번호], pos(비우면 자동 배치), span} 형식, "
-        f"최대 {MAX_TEXTS}개. 걸친 블록들의 길이 합 1초당 {BUDGET_CPS:.0f}자 이내. "
-        "카피는 기본적으로 범위 시작에서 읽을 만큼만 보였다 *사라진다* — 내내 "
-        "띄울 문구는 title 이지 카피가 아니다(꼭 내내면 span:[0,1] 명시). "
-        "**화면에 동시에 보이는 글은 title 포함 2개까지** — 초과분은 렌더러가 "
-        "시간을 비켜 배치하거나 뺀다. 카피가 보일 자리를 원하면 그 블록의 "
-        "caption 을 비우거나 caption_span 으로 틈을 줘라.\n"
+        + ("- narration: 그동안 목소리로 읽을 한 문장(자막과 같아도 된다)\n"
+           if narration else "")
+        + ("- voice: 이 블록의 자막을 목소리가 *그대로* 읽게 하려면 true, 아니면 "
+           "false. 새 문장을 짓는 게 아니다 — 읽는 것은 화면 자막 그 문장이다. "
+           "영상 분위기에 어울릴 때만 켜라(조용히 보여주는 게 나은 장면은 false, "
+           "무작정 다 읽지 않는다). 목소리를 쓰기로 했다면 화면 글은 더 절제하라.\n"
+           if voice_choice else "")
+        + "- title: 제목(Level 1) — 화면 상단에 박을 *영상 자체의* 짧은 제목"
+        "(요청문을 설명하는 '~만들기' 같은 문구가 아니다), 필요 없으면 빈 문자열\n"
+        "- (선택) 최상위 texts: 감탄(Level 3) — 장면의 *순간*에 터지는 외침·"
+        "의성어. {text, blocks:[시작,끝 블록 번호]} 형식, 최대 "
+        f"{MAX_TEXTS}개. **공백 제외 {LEVEL3_MAX_CHARS}자 이내 — 넘으면 통째로 "
+        "버려진다. 문장을 쓰지 마라(문장은 caption 계층).** 등장하는 순간과 "
+        "자리는 렌더러가 정한다(움직임이 터지는 프레임에, 강아지 곁에) — 너는 "
+        "어느 장면(blocks)에서 무슨 감탄이 터질지만 정한다.\n"
         "자막·내레이션이 소재의 관찰 기록과 어긋나지 않게 하라.")
     # 재시도 조건 = JSON 실패 + 구조 무효(블록 0개 또는 자막·대본 전무 — 텍스트 0인
     # 소개 영상은 창작 다양성이 아니라 결함, 실측: 전 블록 caption 빈 값 복권).
@@ -212,19 +235,179 @@ def author_plan(request: str, ws: Workspace, names: list[str],
         r = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}],
                         options={"temperature": AUTHOR_TEMP, "num_predict": 2048,
                                  "repeat_penalty": 1.3},
-                        format=_schema(avail), think=False)
+                        format=_schema(avail, voice_choice), think=False)
         try:
             raw = json.loads(r.message.content)
         except json.JSONDecodeError:
             continue
-        plan = _to_plan(raw, request, avail, narration, allow_caption)
+        plan = _to_plan(raw, request, avail, narration, allow_caption, voice_choice)
         if plan is not None:
+            if allow_caption:
+                # 검수는 부가 안전망 — 실패해도 저작을 죽이지 않는다(안전한 저하).
+                try:
+                    _verify_captions(plan, request, ws, avail, profiles)
+                except Exception as e:
+                    print(f"     [검수] 건너뜀({type(e).__name__}: {e})")
             return plan
     return None
 
 
+_JUDGE_CONF = 0.70   # '지어냄' 판정 확신 하한(logprob 정규화) [잠정]
+
+
+def _caption_claims(caption: str) -> list[str]:
+    """자막의 *사실 주장* 추출 — 검수 1단(주장이 없으면 심판 불필요).
+
+    단일 이진 판정은 기각 계보 2건(simple-demo3 3연속 사고의 교훈): 관대 기준은
+    사물→행동 추론('식기→밥')과 조건절 숨김('밥 먹을 때*만큼은* 활발')을 통과시키고,
+    엄격 기준은 감정·이름·동의어까지 오탐(12/21 실측). 부풀림은 문장 *구성* 속에
+    숨는다 → 주장 단위로 분해해 하나씩 대조한다(추출은 기록을 안 보므로 판정
+    오염 없음).
+    """
+    import ollama
+    prompt = (
+        "문장: " + caption + "\n이 문장이 단정하는 구체적 행동·사건·장소·상황을 "
+        "짧은 구절로 전부 뽑아라 — 조건절·수식으로 스치듯 말한 것도 포함한다. "
+        "감정·매력·이름·호칭 표현은 주장이 아니다. 없으면 빈 배열.")
+    r = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0, "num_predict": 128},
+                    format={"type": "object",
+                            "properties": {"claims": {"type": "array",
+                                                      "items": {"type": "string"}}},
+                            "required": ["claims"]}, think=False)
+    try:
+        return [str(c) for c in json.loads(r.message.content).get("claims") or []
+                if str(c).strip()]
+    except json.JSONDecodeError:
+        return []
+
+
+def _claim_supported(claim: str, record: str) -> bool:
+    """주장 1개 ↔ 기록 대조 — 단일 토큰 + logprob(M4·모드판정의 검증된 레시피)."""
+    import math
+    import ollama
+    prompt = (
+        "관찰 기록: " + record + "\n주장: " + claim +
+        "\n기록의 서술(또는 그 명백한 동의어·직접적 표현)이 이 주장을 뒷받침하면 "
+        "'근거있음', 기록에 없는 행동·상황이면 '지어냄'. 물건이 보인다는 서술은 "
+        "그 물건을 쓰는 행동의 근거가 아니다. 다른 말 없이 한 단어만 출력.")
+    r = ollama.chat(model=MODEL, messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": 0, "num_predict": 4},
+                    think=False, logprobs=True, top_logprobs=10)
+    lp = getattr(r, "logprobs", None)
+    if not lp:
+        return True                     # 판정 불가 = 무혐의(안전한 저하)
+    first = lp[0] if isinstance(lp[0], dict) else lp[0].model_dump()
+    fab = ok = 0.0
+    for c in first.get("top_logprobs", []):
+        tok = (c["token"] or "").strip()
+        if tok.startswith("지"):
+            fab += math.exp(c["logprob"])
+        elif tok.startswith("근"):
+            ok += math.exp(c["logprob"])
+    return not ((fab + ok) > 0 and fab / (fab + ok) >= _JUDGE_CONF)
+
+
+def _caption_fabricated(caption: str, record: str,
+                        _claims_cache: dict | None = None) -> bool:
+    """자막 1개 사실 검수 = 추출(1단) + 주장별 대조(2단). 주장 0개면 무혐의."""
+    if _claims_cache is not None and caption in _claims_cache:
+        claims = _claims_cache[caption]
+    else:
+        claims = _caption_claims(caption)
+        if _claims_cache is not None:
+            _claims_cache[caption] = claims
+    return any(not _claim_supported(c, record) for c in claims)
+
+
+def _verify_captions(plan: EditPlan, request: str, ws: Workspace,
+                     avail: list[str], profiles: dict) -> None:
+    """자막 사실 검수 — 블록당 logprob 판정 + 걸린 블록만 증거 제한 재작성.
+
+    병인(simple-demo3 실측 2026-07-07): 저작이 프로필의 사물 단서를 사건 서사로
+    부풀림('식기 주변에서 움직임'→'밥 먹을 때가 제일 신나요', '문틈 사이로 손을
+    향해 다가옴'→'문틈 사이로 살짝 나타난') + 그 자막이 다른 소재 블록에 얹힘.
+    자막을 못 비우므로(L2=서사 등뼈) 드롭이 아니라 재작성. 검수 기준은 *그 블록
+    소재의 기록*이라 부풀림과 소재-자막 결속 끊김을 한 심판이 잡는다.
+    """
+    import ollama
+    lines = _record_lines(ws, avail, profiles)
+    entries = [(i, b, [s for s in (b.sources or []) if s in lines])
+               for i, b in enumerate(plan.blocks)]
+    entries = [(i, b, srcs) for i, b, srcs in entries if b.caption and srcs]
+    if not entries:
+        return
+    by_idx = {i: (b, srcs) for i, b, srcs in entries}
+
+    claims_cache: dict = {}             # 같은 자막의 주장 추출은 소스 수와 무관 1회
+
+    def _sweep(idxs) -> list[int]:
+        # 소스별 각각 판정 — 자막은 그 블록의 *모든* 소스 클립 위에 뜨므로 하나라도
+        # 못 받치면 그 클립에서 화면 불일치다(simple-demo3 2차 실측: '밥' 자막이
+        # 0195 클립 위에). 합본 기록 한 줄 판정은 희석돼 통과시킴(3회 실측) → 기각.
+        return [i for i in idxs
+                if any(_caption_fabricated(by_idx[i][0].caption, lines[s],
+                                           claims_cache)
+                       for s in by_idx[i][1])]
+
+    def _rewrite(idxs, extra: str) -> None:
+        rew = (
+            "다음 블록들의 하단 자막이 검수에서 '소재 기록에 없는 사실을 지어냄'"
+            "으로 판정됐다. 각각 다시 써라.\n규칙: 그 블록 기록이 보여주는 것 "
+            "안에서만 사실을 말하고, 기록에 물건·배경이 보인다는 이유로 사건을 "
+            "지어내지 마라. 블록에 소재가 여러 개면 자막은 그 *모두*에 맞아야 "
+            "한다 — 한 소재에만 있는 사실 대신 모두에 해당하는 것을 말하라. "
+            "마땅한 사실이 없으면 장면 서술 대신 강아지의 감정·매력을 말하라. "
+            f"{extra}한 문장, 1초당 {BUDGET_CPS:.0f}자 이내. 요청의 말투·호칭은 "
+            "따르되 요청문 자체를 옮겨 적지 마라.\n"
+            f"고객 요청: {request}\n" +
+            "\n".join(f"블록{i} 기록: " + " / ".join(lines[s] for s in by_idx[i][1])
+                      for i in idxs) +
+            "\n블록 순서대로 captions 배열로만 출력.")
+        r = ollama.chat(model=MODEL, messages=[{"role": "user", "content": rew}],
+                        options={"temperature": 0.4, "num_predict": 512,
+                                 "repeat_penalty": 1.3},
+                        format={"type": "object",
+                                "properties": {"captions": {
+                                    "type": "array", "items": {"type": "string"}}},
+                                "required": ["captions"]}, think=False)
+        try:
+            caps = json.loads(r.message.content).get("captions") or []
+        except json.JSONDecodeError:
+            return
+        _apply_rewrites(plan, dict(zip(idxs, caps)), request)
+
+    # 라운드 1 = 증거 제한 재작성, 라운드 2 = 재판정 잔존만 감정 전용(사실 금지 —
+    # 실측: 1차 재작성이 다른 한쪽 소스의 사실('문틈')로 도망). 그래도 남으면 경고.
+    suspects = _sweep([i for i, _, _ in entries])
+    for extra in ("", "이번에는 사실 서술을 아예 하지 말고 강아지의 감정·매력·"
+                      "분위기만 말하라. "):
+        if not suspects:
+            return
+        _rewrite(suspects, extra)
+        suspects = _sweep(suspects)
+    if suspects:
+        print(f"     [검수] ⚠️ 재작성 2회 후에도 잔존: 블록 {suspects} — "
+              "저작 증거 프롬프트 점검 신호")
+
+
+def _apply_rewrites(plan: EditPlan, fixes: dict, request: str) -> None:
+    """검수 재작성 병합(결정론) — 소독 후 교체, 재량 TTS(자막 그대로 읽기) 동기화."""
+    for i, new in fixes.items():
+        if not (isinstance(i, int) and 0 <= i < len(plan.blocks)):
+            continue
+        b = plan.blocks[i]
+        new = _clean_text(str(new or ""), request)
+        if not new or new == b.caption:
+            continue
+        print(f"     [검수] 블록{i} 자막 재작성: {b.caption!r} → {new!r}")
+        if b.narration and b.narration == b.caption:
+            b.narration = new
+        b.caption = new
+
+
 def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
-             allow_caption: bool = True) -> EditPlan | None:
+             allow_caption: bool = True, voice_choice: bool = False) -> EditPlan | None:
     """저작 응답 → 소독된 EditPlan. 구조 무효면 None(호출부가 재추첨)."""
     blocks = []
     for d in (raw.get("blocks") or [])[:MAX_BLOCKS]:
@@ -236,9 +419,7 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
             "zoom": d.get("zoom", "none"),
             "caption": (_watch_echo(d.get("caption", ""), request, "caption")
                         if allow_caption else ""),
-            # 저작 기본 = auto(빈 곳 자동 배치) — 위치는 구도의 사실이라 픽셀을 보는
-            # 렌더러 몫. 8방위 명시는 저작의 연출 의도로 존중한다.
-            "caption_pos": d.get("caption_pos") or AUTO_POS,
+            # L2 위치는 계약(하단 고정) — 저작 출력에 위치 필드가 없다(레벨 기획).
             "caption_span": d.get("caption_span"),
             "narration": (_watch_echo(d.get("narration", ""), request, "narration")
                           if narration else ""),
@@ -249,13 +430,19 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
         b.speed = 1.0
         if b.zoom == "gradual":
             b.subject = "foster"
+        # 재량 TTS = 화면 자막을 *그대로* 읽기 — narration 은 caption 의 결정론
+        # 복사(저작 출력의 자유 대본을 읽지 않아 대본 발명 축이 구조적으로 없다).
+        if voice_choice and d.get("voice") and b.caption:
+            b.narration = b.caption
         blocks.append(b)
     blocks = [b for b in blocks if b.sources or b.select != "all" or b.caption or b.narration]
     if not blocks:
         return None
     title = _watch_echo(str(raw.get("title") or ""), request, "title")
-    # 블록 걸침 카피(texts) 소독 — 복창 감시 + 인덱스 클램프 + 상한. 자막 거부
-    # 요청이면 카피도 텍스트이므로 통째로 버린다(부정 핀 우선).
+    # 감탄(L3, texts) 소독 — 복창 감시 + 인덱스 클램프 + 상한 + **글자 계약**:
+    # 공백 제외 LEVEL3_MAX_CHARS 초과는 자르지 않고 통째로 드롭(자르면 뜻이
+    # 깨진다 — 레벨 기획 2026-07-07). 자막 거부 요청이면 감탄도 텍스트이므로
+    # 통째로 버린다(부정 핀 우선). 자리·순간 필드는 스키마에 없다(렌더러 몫).
     texts = []
     if allow_caption:
         for d in (raw.get("texts") or [])[:MAX_TEXTS]:
@@ -263,22 +450,19 @@ def _to_plan(raw: dict, request: str, avail: list[str], narration: bool,
                 continue
             t = PlanText.from_dict(
                 dict(d, text=_watch_echo(str(d.get("text") or ""), request, "texts")))
-            if t.text and t.blocks and t.blocks[0] < len(blocks):
-                t.blocks = [min(t.blocks[0], len(blocks) - 1),
-                            min(t.blocks[1], len(blocks) - 1)]
-                texts.append(t)
-    # 상시 요소와의 충돌 소독 — top-right=AI 배지, title 채웠으면 top 은 title
-    # 자리이고 그 이웃 구석(top-left/top-right)도 인접 금지(ADJACENT — 붙은 자리는
-    # 번인이 겹치는 느낌, 2026-07-06 사용자). 저작 위치 지정은 연출 재량이지만
-    # 상시 요소와의 겹침은 항상 결함(실측: title 채우고 블록0 자막 @top)이라
-    # 재량이 아니다 → auto 강등(빈 곳 자동이 대신 찾음).
-    for x in blocks + texts:
-        pos = x.caption_pos if isinstance(x, EditBlock) else x.pos
-        if pos == "top-right" or (title and pos in ("top", "top-left")):
-            if isinstance(x, EditBlock):
-                x.caption_pos = AUTO_POS
-            else:
-                x.pos = AUTO_POS
+            if not (t.text and t.blocks and t.blocks[0] < len(blocks)):
+                continue
+            if len(t.text.replace(" ", "")) > LEVEL3_MAX_CHARS:
+                print(f"     [저작] L3 감탄 {len(t.text)}자 > 계약 "
+                      f"{LEVEL3_MAX_CHARS}자 → 드롭: {t.text[:20]!r}")
+                continue
+            t.blocks = [min(t.blocks[0], len(blocks) - 1),
+                        min(t.blocks[1], len(blocks) - 1)]
+            t.pos = AUTO_POS                   # 저작 감탄의 자리는 전부 렌더러 몫
+            texts.append(t)
+    # 목소리를 쓰면 화면 글은 절제(사용자 2026-07-07) — 감탄은 최대 1개.
+    if voice_choice and any(b.narration for b in blocks):
+        texts = texts[:1]
     # 텍스트 전무 = 결함(재추첨) — 단 고객이 자막을 거부했으면 무자막이 곧 의도.
     if allow_caption and not any(b.caption or b.narration for b in blocks) and not texts:
         return None
@@ -370,7 +554,9 @@ def fill_plan(request: str, ws: Workspace, names: list[str],
         "출력하고, 이미 값이 있는 항목의 출력은 무시된다.\n"
         "- caption: 자막 한 문장 — 영상을 *보는 사람*에게 말하는 새 "
         "문장으로(요청문을 옮겨 적지 마라). 강아지 이름·고객의 말투는 따른다. "
-        f"눈으로 읽는 글이니 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라.\n"
+        f"눈으로 읽는 글이니 블록 길이 1초당 {BUDGET_CPS:.0f}자를 넘기지 마라. "
+        "사실 주장은 관찰 기록이 보여주는 범위까지만 — 기록이 뒷받침하지 않는 "
+        "사건·행동을 지어내지 마라(불확실하면 감정·분위기로).\n"
         "- dur: 그 블록 길이(초, 3~10)\n"
         "- sources: 키워드 없는 블록만 — 그 장면에 어울리는 소재 이름 1~3개"
         "(관찰 기록을 근거로)")
@@ -402,14 +588,9 @@ def _merge_fill(plan: EditPlan, raw: dict, request: str, avail: list[str],
             if allow_caption and not b.caption:
                 cap = _watch_echo(d.get("caption", ""), request, "caption")
                 if cap:
-                    b.caption = cap
-                    # 저작이 채운 자막 = 저작 소유 → 위치도 auto(빈 곳 자동 배치).
-                    # 8방위 출력이 있으면 존중(현 fill 스키마엔 없음 — 예비).
-                    b.caption_pos = (d["caption_pos"]
-                                     if d.get("caption_pos") in TEXT_POSITIONS
-                                     else AUTO_POS)
+                    b.caption = cap        # L2 위치는 계약(하단) — pos 필드 없음
                     b.caption_span = EditBlock._clean_span(d.get("caption_span"))
-                    filled.append(f"caption={cap!r}@{b.caption_pos}")
+                    filled.append(f"caption={cap!r}")
             if not b.target_dur:
                 dur = float(d.get("dur") or 0)
                 if dur > 0:

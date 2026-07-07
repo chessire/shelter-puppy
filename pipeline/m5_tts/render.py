@@ -69,7 +69,6 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
         return len(data) / sr
 
     allowed = allowed_sources_per_block(plan, sources, ws)   # 핀 소스 예약(선점 방지)
-    avoid = ("top",) if plan.title else ()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         used: set = set()
@@ -81,7 +80,7 @@ def render_narrated(plan: EditPlan, sources, out_path: str, size=(1080, 1920),
                 need = _phrase_sec(row) + DEFAULT_PAUSE
                 block.target_dur = max(block.target_dur or 0.0, need)
             vid, clips, cap_pos = render_block(block, allowed[idx], tmp, idx, size,
-                                               fps, exclude=used, ws=ws, avoid=avoid)
+                                               fps, exclude=used, ws=ws)
             if vid is None:                    # 조건 맞는 클립 없음 → 블록·구절 함께 드롭
                 print(f"  [경고] 블록{idx} 클립 없음 → 구절과 함께 제외: "
                       f"{block.narration[:30]!r}")

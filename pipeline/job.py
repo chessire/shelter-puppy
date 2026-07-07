@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import time
 from collections import Counter
@@ -31,7 +32,8 @@ from .harness import io
 from .m1_track.run import run as m1_run
 from .m4_action.run import run_many as m4_run_many
 from .m5_tts import DEFAULT_VOICE
-from .m5_tts.interpret import decide_mode, interpret_narration
+from .m5_tts.interpret import (decide_mode, interpret_narration,
+                               voice_discretion_allowed)
 from .m5_tts.render import render_narrated
 from .m6_edit.badge import apply_badge
 from .m6_edit.run import _probe_dur, interpret_plan, render_plan
@@ -330,18 +332,27 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
 
     mode = meta.get("mode")
     if mode in ("narration", "edit"):
+        # mode_source="auto" 는 이전 렌더의 자동 라우팅 영속화 — 재렌더에도 재량
+        # TTS 가 유지된다. 그 외(카드 1탭·수동·구버전 잡)는 출처 불명 = 유저 결정
+        # 취급(보수적 — 놀라운 목소리 주입 금지).
+        auto_routed = meta.get("mode_source") == "auto"
         print(f"[모드] {mode} (meta 지정)")
     else:
         mode, conf = decide_mode(request)
+        auto_routed = True
         if mode == "uncertain":
             ws.update_meta(state="needs_mode_pick", request=request)
             raise SystemExit(
                 f"{ws.root}: 자막/음성 모호(확신 {conf:.2f}) — 고객 카드 대상. "
                 "meta.mode 를 'narration' 또는 'edit' 로 설정 후 재시도.")
         print(f"[모드] {mode} (확신 {conf:.2f})")
+    # 저작 재량 TTS 게이트 — TTS 소유권 이진(유저 언급 시 완전 꺼짐, interpret 참고)
+    allow_voice = voice_discretion_allowed(mode, auto_routed, request)
 
     voice = voice or meta.get("voice") or DEFAULT_VOICE
-    ws.update_meta(state="rendering", request=request, mode=mode, voice=voice)
+    ws.update_meta(state="rendering", request=request, mode=mode, voice=voice,
+                   mode_source=("auto" if auto_routed
+                                else meta.get("mode_source") or "user"))
     pending = []
     for name in names:
         if ws.preds_m4(name).exists():
@@ -357,7 +368,7 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
     sources = [(str(ws.analysis(n)), str(ws.preds_m4(n))) for n in names]
     out_path = ws.out(out_name)
 
-    def _maybe_author(plan, want_narration: bool):
+    def _maybe_author(plan, want_narration: bool, voice_choice: bool = False):
         """저작 3분기 — 구조 소유권은 이진, 빈칸 채움이 그라디언트(2026-07-03 설계).
 
         ① 구조 없음(기본값 블록 1개/장님 작문) → 전체 저작(구성 작가)
@@ -370,7 +381,8 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
                                      script_invented)
         if is_unstructured(plan) or script_invented(plan, request):
             print("[저작] 요청에 구성 없음 → 관찰 프로필로 구성·대본 창작…")
-            authored = author_plan(request, ws, names, narration=want_narration)
+            authored = author_plan(request, ws, names, narration=want_narration,
+                                   voice_choice=voice_choice)
             if authored is None:
                 print("     저작 실패 — 번역 플랜으로 폴백")
                 return plan
@@ -383,22 +395,42 @@ def render(ws: Workspace, request: str, size: tuple[int, int] = (1080, 1920),
             return authored
         return fill_plan(request, ws, names, plan, narration=want_narration)
 
+    def _dump_plan(plan) -> None:
+        """플랜 사이드카 — 실사용 사고 부검용(simple-demo3 자막 병인 추적이 플랜
+        부재로 막혔던 실측 2026-07-07). 렌더 *전에* 남겨 실패해도 부검 가능."""
+        from dataclasses import asdict
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.with_suffix(".plan.json").write_text(
+            json.dumps({"mode": mode, "request": request, "plan": asdict(plan)},
+                       ensure_ascii=False, indent=1), encoding="utf-8")
+
     if mode == "narration":
         print("[M5+M6] 대본 분해·합성·렌더…")
         plan = _maybe_author(interpret_narration(request), True)
         n_narr = sum(1 for b in plan.blocks if b.narration)
         print(f"     블록 {len(plan.blocks)}개 (내레이션 {n_narr}구절, 보이스 {voice})")
         _infer_scenes(ws, names, plan)
+        _dump_plan(plan)
         render_narrated(plan, sources, str(out_path), size, fps, ws=ws, voice=voice)
     else:
         print("[M6] 편집 인텐트 해석…")
-        plan = _maybe_author(interpret_plan(request), False)
+        plan = _maybe_author(interpret_plan(request), False, allow_voice)
         print(f"     title={plan.title!r}  블록 {len(plan.blocks)}개")
         _infer_scenes(ws, names, plan)
-        raw = out_path.with_name("_raw_" + out_name)
-        render_plan(plan, sources, str(raw), size, fps, ws=ws)
-        apply_badge(raw, out_path, tts=False, size=size)   # 모드 B 도 "AI 편집" 배지
-        raw.unlink(missing_ok=True)
+        _dump_plan(plan)
+        if any(b.narration for b in plan.blocks):
+            # 저작 재량 TTS — 화면 자막 읽기. 모드 A 기계를 그대로 타므로 구절=블록
+            # 순차(충돌 구조적 불가), 배지도 "AI 편집 · AI 음성" 자동.
+            n_read = sum(1 for b in plan.blocks if b.narration)
+            print(f"[저작] 재량 TTS — 자막 읽기 {n_read}/{len(plan.blocks)}블록 "
+                  f"(보이스 {voice})")
+            render_narrated(plan, sources, str(out_path), size, fps, ws=ws,
+                            voice=voice)
+        else:
+            raw = out_path.with_name("_raw_" + out_name)
+            render_plan(plan, sources, str(raw), size, fps, ws=ws)
+            apply_badge(raw, out_path, tts=False, size=size)   # 모드 B 도 "AI 편집" 배지
+            raw.unlink(missing_ok=True)
     ws.update_meta(state="done", out=str(out_path))
     print(f"[done] → {out_path}  (실측 {_probe_dur(str(out_path)):.1f}s)")
     return out_path
