@@ -119,7 +119,7 @@ yolo11m.pt   YOLO 가중치 (측정으로 11n 대신 채택)
 
 ## 환경 셋업
 
-Apple Silicon 전제(YOLO MPS · TTS MLX). 자세한 과정은 개발 기록의 [환경설정] 페이지 참고.
+Apple Silicon 전제(YOLO MPS · TTS MLX). 자세한 내용은 개발 과정의 [맥 로컬 LLM 구축](https://chessire.tistory.com/entry/local-ai-first-how) 페이지 참고.
 
 ```bash
 # 시스템 도구
@@ -146,12 +146,3 @@ python -m pipeline.harness.cli report --stage m1
 # 단위 테스트 (148개)
 python -m pytest pipeline/tests
 ```
-
-게이트 통과 이력: M2 re-ID 1.75탭/영상(목표 <2) · M4 군 정확도 1.00, uncertain 0.15 ·
-e2e 2×2 매트릭스(자막×음성) 4/4 · 실사용 풀 라이프사이클 8분→4분(병렬화 1차).
-
-## 개발 기록
-
-의사결정 근거와 트러블슈팅 전체 기록은 Notion [MVP 개발 과정](https://app.notion.com/p/38e55c580506807493a1c66bb3d8869c):
-환경설정 · 빌드 프로세스 · M0~M3 · M4/M6/통합 · M5 TTS/모드 라우팅 · 폴리싱(저작·텍스트 영역) ·
-속도 최적화 · 폴리싱(텍스트 번인·TTS)
