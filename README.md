@@ -18,7 +18,7 @@ python -m pipeline.job my_job \
 3. **[YOLO11 해상도 함정](https://chessire.tistory.com/entry/measurement-first-ai-golden-set)**, 정답지부터 만들고 모델을 붙인다. 해상도를 올렸더니 오히려 나빠진 이야기.
 4. **[결정론적 AI 파이프라인 설계](https://chessire.tistory.com/entry/deterministic-first-ai-interpretation)**, 같은 입력이면 같은 출력. 창작만 예외로 두되, 그 창작에도 가드를 건다.
 5. **[로컬 TTS로 타임라인 컨트롤](https://chessire.tistory.com/entry/narration-first-ai)**, 대본을 음성으로, 음성을 영상 타임라인에 맞추기.
-6. **LLM은 지시만(발행예정)**, 프롬프트에 내용을 넣으면 출력으로 샌다. 같은 문제를 네 번 고치고 얻은 규칙.
+6. **[LLM은 지시만](https://chessire.tistory.com/entry/ownership-first-ai)**, 프롬프트에 내용을 넣으면 출력으로 샌다. 같은 문제를 네 번 고치고 얻은 규칙.
 7. **스레드보다 자원(발행예정)**, 8분을 4분으로. 가장 큰 배수는 멀티스레딩이 아니라, 놀고 있던 GPU를 깨운 한 줄에서 나왔습니다.
 8. **전체 요약(발행예정)**
 
